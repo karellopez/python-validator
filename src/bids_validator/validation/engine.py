@@ -27,14 +27,16 @@ from typing import Any
 
 from bidsschematools.types.namespace import Namespace
 
+from . import schema_introspect as introspect
 from .expressions import EvaluationError, evaluate_string, truthy
-from .issues import Issue, RuleProvenance, Severity
+from .issues import Fix, Issue, RuleProvenance, Severity
+from .rules.guidance import field_guidance, value_guidance
+from .rules.values import validate_value
 
-# Rule groups this engine evaluates today. ``checks`` is the generic
-# selector-gated boolean group. The field/column/value groups (``sidecars``,
-# ``dataset_metadata``, ``tabular_data``) are added with their rule families in a
-# later phase.
-_EVALUATED_GROUPS: tuple[str, ...] = ('checks',)
+# Rule groups this engine evaluates. ``checks`` is the generic selector-gated
+# boolean group; ``sidecars`` and ``dataset_metadata`` carry required/recommended
+# field rules. The tabular ``columns`` group has its own rule family.
+_EVALUATED_GROUPS: tuple[str, ...] = ('checks', 'sidecars', 'dataset_metadata')
 
 # Context fields/aggregates not yet populated with real data. A rule that depends
 # on one of these cannot be determined, so it is skipped rather than evaluated
@@ -53,6 +55,19 @@ _LEVEL_TO_SEVERITY: dict[str, Severity] = {
     'error': Severity.ERROR,
     'warning': Severity.WARNING,
 }
+
+# Field requirement level -> severity (for sidecar / dataset_description fields).
+_FIELD_LEVEL_TO_SEVERITY: dict[str, Severity] = {
+    'required': Severity.ERROR,
+    'recommended': Severity.WARNING,
+    'optional': Severity.IGNORE,
+    'prohibited': Severity.IGNORE,
+}
+
+# Files that cannot themselves carry a sidecar, so sidecar field rules do not apply.
+_SIDECAR_EXEMPT_EXTENSIONS = ('.json', '', '.md', '.txt', '.rst', '.cff')
+
+_ADDENDUM_RE = re.compile(r'(required|recommended) if `(\w+)` is `(\w+)`')
 
 
 def apply_rules(schema: Namespace, context: Mapping[str, Any]) -> list[Issue]:
@@ -76,34 +91,44 @@ def apply_rules(schema: Namespace, context: Mapping[str, Any]) -> list[Issue]:
     rules = schema['rules']
     for group in _EVALUATED_GROUPS:
         if group in rules:
-            _descend(rules[group], context, issues, f'rules.{group}')
+            _descend(schema, rules[group], context, issues, f'rules.{group}')
+    issues.extend(_validate_present_values(schema, context))
     return _dedupe(issues)
 
 
-def _descend(node: Any, context: Mapping[str, Any], issues: list[Issue], path: str) -> None:
+def _descend(
+    schema: Namespace,
+    node: Any,
+    context: Mapping[str, Any],
+    issues: list[Issue],
+    path: str,
+) -> None:
     """Walk a rule subtree, evaluating each selector-bearing rule it contains."""
     if not isinstance(node, Mapping):
         return
     if 'selectors' in node:
-        _eval_rule(node, context, issues, path)
+        _eval_rule(schema, node, context, issues, path)
         return
     for key, child in node.items():
-        _descend(child, context, issues, f'{path}.{key}')
+        _descend(schema, child, context, issues, f'{path}.{key}')
 
 
 def _eval_rule(
+    schema: Namespace,
     rule: Mapping[str, Any],
     context: Mapping[str, Any],
     issues: list[Issue],
     path: str,
 ) -> None:
-    """Apply one rule: if its selectors pass, evaluate its checks."""
+    """Apply one rule: if its selectors pass, evaluate its checks and field rules."""
     if not _is_evaluable(rule):
         return
     if not _selectors_pass(rule.get('selectors', []), context):
         return
     if 'checks' in rule:
         _eval_checks(rule, context, issues, path)
+    if 'fields' in rule:
+        _eval_fields(schema, rule, context, issues, path)
 
 
 def _is_evaluable(rule: Mapping[str, Any]) -> bool:
@@ -181,3 +206,121 @@ def _dedupe(issues: list[Issue]) -> list[Issue]:
 def _location(context: Mapping[str, Any]) -> str:
     """Return the dataset-relative path of the file (no leading slash)."""
     return str(context.get('path', '')).lstrip('/')
+
+
+def _eval_fields(
+    schema: Namespace,
+    rule: Mapping[str, Any],
+    context: Mapping[str, Any],
+    issues: list[Issue],
+    path: str,
+) -> None:
+    """Emit a finding for each required/recommended field the file is missing.
+
+    Sidecar rules (``rules.sidecars``) read the inheritance-merged sidecar of a
+    data file; dataset_metadata rules read the JSON of dataset_description.json.
+    Presence is checked here; the value of a present field is validated by
+    :func:`_validate_present_values`.
+    """
+    is_sidecar_rule = path.startswith('rules.sidecars')
+    if is_sidecar_rule and context.get('extension') in _SIDECAR_EXEMPT_EXTENSIONS:
+        return
+    data = context.get('sidecar') if is_sidecar_rule else context.get('json')
+    if not isinstance(data, Mapping):
+        return
+
+    metadata = schema['objects'].get('metadata', {})
+    for field_key, requirement in rule['fields'].items():
+        meta_def = metadata.get(field_key, {})
+        field_name = str(meta_def.get('name', field_key))
+        if field_name in data:
+            continue  # present; value validation is a separate global pass
+        severity = _field_severity(requirement, context)
+        if severity is Severity.IGNORE:
+            continue
+        issues.append(
+            _missing_field_issue(
+                schema, requirement, field_name, severity, context, path, is_sidecar_rule
+            )
+        )
+
+
+def _field_severity(requirement: Any, context: Mapping[str, Any]) -> Severity:
+    """Resolve a field requirement (a level string or a level object) to a severity."""
+    if isinstance(requirement, str):
+        return _FIELD_LEVEL_TO_SEVERITY.get(requirement, Severity.IGNORE)
+    if isinstance(requirement, Mapping):
+        severity = _FIELD_LEVEL_TO_SEVERITY.get(str(requirement.get('level', '')), Severity.IGNORE)
+        addendum = requirement.get('level_addendum')
+        if addendum:
+            match = _ADDENDUM_RE.search(str(addendum))
+            if match:
+                conditional_level, key, value = match.groups()
+                sidecar = context.get('sidecar') or {}
+                if isinstance(sidecar, Mapping) and str(sidecar.get(key)) == value:
+                    severity = _FIELD_LEVEL_TO_SEVERITY.get(conditional_level, severity)
+        return severity
+    return Severity.IGNORE
+
+
+def _missing_field_issue(
+    schema: Namespace,
+    requirement: Any,
+    field_name: str,
+    severity: Severity,
+    context: Mapping[str, Any],
+    path: str,
+    is_sidecar_rule: bool,
+) -> Issue:
+    """Build the missing-field finding (a per-field code override is honoured)."""
+    requirement_issue = requirement.get('issue') if isinstance(requirement, Mapping) else None
+    if isinstance(requirement_issue, Mapping) and requirement_issue.get('code'):
+        code = str(requirement_issue['code'])
+    else:
+        kind = 'SIDECAR' if is_sidecar_rule else 'JSON'
+        tier = 'REQUIRED' if severity is Severity.ERROR else 'RECOMMENDED'
+        code = f'{kind}_KEY_{tier}'
+    tier_word = 'required' if severity is Severity.ERROR else 'recommended'
+    return Issue(
+        code=code,
+        sub_code=field_name,
+        severity=severity,
+        location=_location(context),
+        message=f'missing {tier_word} field {field_name!r}',
+        suggestion=field_guidance(schema, field_name),
+        rule=path,
+        fix=Fix(action='add_field', field=field_name),
+    )
+
+
+def _validate_present_values(schema: Namespace, context: Mapping[str, Any]) -> list[Issue]:
+    """Validate the value of every present sidecar / json field against its schema def.
+
+    A field whose name maps to several definitions is valid if it matches any of
+    them, so context-specific duplicate names never cause a false positive.
+    """
+    is_json = context.get('extension') == '.json'
+    data = context.get('json') if is_json else context.get('sidecar')
+    if not isinstance(data, Mapping):
+        return []
+    by_name = introspect.metadata_by_name(schema)
+    location = _location(context)
+    issues: list[Issue] = []
+    for field_name, value in data.items():
+        definitions = by_name.get(field_name)
+        if not definitions:
+            continue
+        problems = [validate_value(value, definition) for definition in definitions]
+        if all(problems):  # the value fails every definition for this name
+            issues.append(
+                Issue(
+                    code='JSON_SCHEMA_VALIDATION_ERROR',
+                    sub_code=field_name,
+                    severity=Severity.ERROR,
+                    location=location,
+                    message=f'{field_name} {problems[0][0]}',
+                    suggestion=value_guidance(field_name, definitions[0]),
+                    rule='objects.metadata',
+                )
+            )
+    return issues
