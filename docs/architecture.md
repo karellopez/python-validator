@@ -2,9 +2,10 @@
 
 This document walks through the validation engine stage by stage, in the order
 the code runs. It starts from the entry point and goes deeper one piece at a time,
-so each concept is introduced before it is used. If you have not read
-[what-changed.md](what-changed.md), start there: it explains how this engine
-relates to the original filename check.
+so each concept is introduced before it is used. If terms like rule, context, or
+expression are unfamiliar, read [concepts.md](concepts.md) first; it explains them
+from scratch with examples. For how this engine relates to the original filename
+check, see [what-changed.md](what-changed.md).
 
 All paths below are under `src/bids_validator/`. The engine lives in
 `validation/`; it builds on a few files in the package root (`context.py`,

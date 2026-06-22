@@ -42,6 +42,7 @@ A few other things worth knowing:
 
 | Document | Read it for |
 |---|---|
+| [concepts.md](concepts.md) | The core ideas explained from scratch, with real examples: what the schema, context, expressions, and rules are, how they differ, and where each part of a finding comes from. Start here if any of those words are unclear. |
 | [what-changed.md](what-changed.md) | How the previous filename check worked, what this added, how, and why. Start here if you know the old `is_bids` and want to understand the new engine. |
 | [tutorial.md](tutorial.md) | A hands-on walkthrough of the command line and the Python API, with runnable examples: validate a dataset or a single file, choose a schema, every output format, inspect findings in Python, and CI integration. |
 | [cli-reference.md](cli-reference.md) | The complete command-line reference: every option, every output format, exit codes, and recipes. |
