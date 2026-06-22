@@ -103,3 +103,29 @@ def test_bom_participants_no_false_positive(tmp_path: Path) -> None:
     report = validate(tmp_path)
     codes = {i.code for v in report.files for i in v.issues}
     assert 'PARTICIPANT_ID_MISMATCH' not in codes
+
+
+def test_ignored_locations_are_not_validated(tmp_path: Path) -> None:
+    # sourcedata/, derivatives/, code/ and hidden paths are skipped by default,
+    # so empty files there are not flagged; an empty file in a validated location
+    # still is.
+    (tmp_path / 'sub-01' / 'anat').mkdir(parents=True)
+    (tmp_path / 'sourcedata').mkdir()
+    (tmp_path / 'derivatives').mkdir()
+    (tmp_path / 'code').mkdir()
+    (tmp_path / '.hidden').mkdir()
+    (tmp_path / 'dataset_description.json').write_text(
+        json.dumps({'Name': 'ignored', 'BIDSVersion': '1.11.1'})
+    )
+    (tmp_path / 'sourcedata' / 'raw.nii.gz').write_bytes(b'')
+    (tmp_path / 'derivatives' / 'x.nii.gz').write_bytes(b'')
+    (tmp_path / 'code' / 'run.py').write_bytes(b'')
+    (tmp_path / '.hidden' / 'y.txt').write_bytes(b'')
+    (tmp_path / 'sub-01' / 'anat' / 'sub-01_T1w.nii.gz').write_bytes(b'')
+
+    report = validate(tmp_path)
+    validated = {str(v.path) for v in report.files}
+    assert 'sub-01/anat/sub-01_T1w.nii.gz' in validated
+    assert not any(
+        str(v.path).startswith(('sourcedata', 'derivatives', 'code', '.')) for v in report.files
+    )

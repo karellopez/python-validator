@@ -25,6 +25,7 @@ from .context import eval_context, iter_file_contexts
 from .engine import apply_rules
 from .issues import Issue, Severity
 from .report import FileVerdict, ValidationReport
+from .rules import integrity_checks
 
 if TYPE_CHECKING:
     import os
@@ -34,6 +35,20 @@ if TYPE_CHECKING:
     from ..context import Context
 
 __all__ = ['validate', 'validate_file']
+
+# Top-level directories the reference validator does not validate as BIDS by
+# default (their contents are associated data, not BIDS files), plus hidden paths
+# (a component starting with "."). Full .bidsignore handling lands with the
+# dataset-level checks.
+_IGNORED_TOP_DIRS = frozenset({'sourcedata', 'derivatives', 'code'})
+
+
+def _is_ignored(path: str) -> bool:
+    """Return True if a dataset-relative path is outside default BIDS validation."""
+    parts = path.lstrip('/').split('/')
+    if any(part.startswith('.') for part in parts):
+        return True
+    return bool(parts) and parts[0] in _IGNORED_TOP_DIRS
 
 
 def validate(
@@ -73,6 +88,8 @@ def validate(
         schema_version=str(schema_ns['schema_version']),
     )
     for context in iter_file_contexts(tree, schema_ns):
+        if _is_ignored(context.path):
+            continue
         report.files.append(_validate_one(schema_ns, context, read_headers=read_headers))
     report.recompute()
     return report
@@ -121,9 +138,11 @@ def _validate_one(
     location = context.path.lstrip('/')
     verdict = FileVerdict(path=Path(location))
     try:
+        evaluation = eval_context(context, read_headers=read_headers)
         verdict.issues.extend(
-            apply_rules(schema_ns, eval_context(context, read_headers=read_headers))
+            integrity_checks(context.file, evaluation, read_headers=read_headers)
         )
+        verdict.issues.extend(apply_rules(schema_ns, evaluation))
     except Exception as error:  # noqa: BLE001 - never let one file abort the whole run
         verdict.issues.append(
             Issue(
