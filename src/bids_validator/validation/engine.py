@@ -31,12 +31,13 @@ from . import schema_introspect as introspect
 from .expressions import EvaluationError, evaluate_string, truthy
 from .issues import Fix, Issue, RuleProvenance, Severity
 from .rules.guidance import field_guidance, value_guidance
+from .rules.tables import eval_columns
 from .rules.values import validate_value
 
 # Rule groups this engine evaluates. ``checks`` is the generic selector-gated
 # boolean group; ``sidecars`` and ``dataset_metadata`` carry required/recommended
-# field rules. The tabular ``columns`` group has its own rule family.
-_EVALUATED_GROUPS: tuple[str, ...] = ('checks', 'sidecars', 'dataset_metadata')
+# field rules; ``tabular_data`` carries TSV column rules.
+_EVALUATED_GROUPS: tuple[str, ...] = ('checks', 'sidecars', 'dataset_metadata', 'tabular_data')
 
 # Context fields/aggregates not yet populated with real data. A rule that depends
 # on one of these cannot be determined, so it is skipped rather than evaluated
@@ -129,6 +130,8 @@ def _eval_rule(
         _eval_checks(rule, context, issues, path)
     if 'fields' in rule:
         _eval_fields(schema, rule, context, issues, path)
+    if 'columns' in rule and path.startswith('rules.tabular_data'):
+        issues.extend(eval_columns(schema, rule, context, path))
 
 
 def _is_evaluable(rule: Mapping[str, Any]) -> bool:
