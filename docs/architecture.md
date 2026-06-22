@@ -1,503 +1,456 @@
-# Architecture: how the validator works
+# How the validator works
 
-A fine-grained developer guide to the full-validation engine. It explains the
-design bets, the data flow end to end, the key functions and why they exist, and
-the invariant that holds the whole thing together: **never emit a false
-positive.** Diagrams are Mermaid (GitHub renders them inline).
+This document walks through the validation engine stage by stage, in the order
+the code runs. It starts from the entry point and goes deeper one piece at a time,
+so each concept is introduced before it is used. If you have not read
+[what-changed.md](what-changed.md), start there: it explains how this engine
+relates to the original filename check.
 
-- [The one big idea](#the-one-big-idea)
-- [The never-false-positive invariant](#the-never-false-positive-invariant)
-- [Top-level pipeline](#top-level-pipeline)
-- [Schema resolution](#schema-resolution)
-- [The file model and per-file context](#the-file-model-and-per-file-context)
-- [The expression engine](#the-expression-engine)
-- [The rule engine](#the-rule-engine)
-- [The hand-ported rule families](#the-hand-ported-rule-families)
-- [Associations](#associations)
-- [The result model and renderers](#the-result-model-and-renderers)
-- [Module map](#module-map)
+All paths below are under `src/bids_validator/`. The engine lives in
+`validation/`; it builds on a few files in the package root (`context.py`,
+`types/files.py`, `bidsignore.py`) that predate it.
 
-All paths below are under `src/bids_validator/`. The full engine lives in
-`validation/`; the original package files (`context.py`, `types/files.py`,
-`bidsignore.py`, `bids_validator.py`) are reused mostly unchanged.
+- [A first look at a run](#a-first-look-at-a-run)
+- [Reading the BIDS schema](#reading-the-bids-schema)
+- [Building the file tree](#building-the-file-tree)
+- [Turning one file into a context](#turning-one-file-into-a-context)
+- [Evaluating the schema's expressions](#evaluating-the-schemas-expressions)
+- [Running the rules](#running-the-rules)
+- [Checks written directly in Python](#checks-written-directly-in-python)
+- [Looking across the whole dataset](#looking-across-the-whole-dataset)
+- [The result and how it is shown](#the-result-and-how-it-is-shown)
+- [The full pipeline, end to end](#the-full-pipeline-end-to-end)
+- [Module layout](#module-layout)
 
-## The one big idea
+## A first look at a run
 
-The single design bet is that **the BIDS schema is the engine, not a checklist
-bolted on at the end.** Every datatype, entity, suffix, extension, metadata field
-definition, and the rules themselves are read from the
-[`bidsschematools`](https://github.com/bids-standard/bids-specification) schema at
-runtime. Nothing about BIDS is hardcoded. Point the validator at a different
-schema and its entire vocabulary and rule set change with it (see
-[Schema resolution](#schema-resolution)).
-
-Three structural choices follow from that bet:
-
-1. **One schema flows through everything.** A single resolved schema `Namespace`
-   is threaded into every layer; nothing else ever branches on the BIDS version.
-2. **One I/O path.** Every file is read through a small set of cached loaders in
-   `context.py`. The engine-facing context (`EvalContext`) adapts types but never
-   opens a second read path, so each file is read at most once.
-3. **Pure data, no orchestrator class.** Findings are plain `attrs` records;
-   orchestration is straight-line code in `validation/validate.py`.
-
-## The never-false-positive invariant
-
-The porting contract from the Deno reference validator is strict: **the Python
-validator's findings must be a subset of the reference's.** A finding is only
-emitted when the validator can *prove* a violation from the available context.
-Anything undeterminable is skipped, never reported.
-
-This is implemented as a layered set of skip gates:
+The entry point is `validate(root, *, schema=None, read_headers=True, max_rows=1000)`
+in [`validation/validate.py`](../src/bids_validator/validation/validate.py)
+(line 68). At a high level it does five things: pick a schema, read the dataset's
+files into a tree, build a small context object for each file, run the checks on
+each file, and then run a few checks that need to see the whole dataset at once.
 
 ```mermaid
 flowchart TD
-    A["A rule references some context"] --> B{"Can the selector<br/>be evaluated?"}
-    B -- "raises EvaluationError<br/>(unknown function, parse error)" --> SKIP1["Skip the whole rule"]
-    B -- yes --> C{"Do all selectors<br/>pass (truthy)?"}
-    C -- no --> SKIP2["Rule does not apply"]
-    C -- yes --> D{"Check evaluates to..."}
-    D -- "null (undeterminable)" --> SKIP3["Skip this check"]
-    D -- "EvaluationError" --> SKIP3
-    D -- "determinate truthy" --> OK["No finding"]
-    D -- "determinate falsy" --> EMIT["Emit one finding"]
+    A["validate(root)"] --> B["pick a schema"]
+    B --> C["read the files into a tree"]
+    C --> D["for each file: build a context,<br/>then run the per-file checks"]
+    D --> E["run the dataset-wide checks"]
+    E --> F["a report: every finding,<br/>with a code, severity, and location"]
 ```
 
-The same philosophy appears everywhere below: a missing context variable resolves
-to `null` rather than raising; an unreadable NIfTI header degrades to `null`; an
-unparseable column pattern falls back to "accept everything"; a symlinked
-(unfetched git-annex) file is skipped; an incompatible sidecar redefinition is
-ignored in favour of the schema; a directory recording is treated as one unit and
-never descended into. Each of these is a place where a naive validator would emit
-a false positive, and each is deliberately defused.
+`validate` never raises because the dataset is bad. Every problem becomes a
+finding in the report, and the per-file work is wrapped so that one unreadable
+file turns into a single warning rather than stopping the run (`validate.py:168`,
+`_validate_one`). `validate_file(root, relpath)` (`validate.py:133`) is the same
+machinery but returns only one file's findings; it still reads the whole dataset
+first, because some checks depend on neighbouring files.
 
-## Top-level pipeline
+The sections below open up each of those five steps.
 
-`validate(root, *, schema=None, read_headers=True, max_rows=1000)`
-(`validation/validate.py:68`) is the orchestrator. It never raises on a bad
-dataset: every problem becomes a finding, and one unvalidatable file cannot abort
-the run.
+## Reading the BIDS schema
+
+Almost everything this validator knows about BIDS, the datatypes, the entities,
+the suffixes, the file extensions, the metadata field definitions, and most of the
+rules, comes from the BIDS schema rather than from code. The schema is a large
+data structure produced by `bidsschematools`. Working this way means the validator
+follows the standard as the schema changes, and it can run against more than one
+version of BIDS.
+
+Choosing which schema to use is the job of
+[`validation/schema/resolve.py`](../src/bids_validator/validation/schema/resolve.py).
+Everything else in the engine receives one already-resolved schema and reads from
+it, so no other module has to think about BIDS versions.
 
 ```mermaid
 flowchart TD
-    START["validate(root, schema, read_headers)"] --> RESOLVE["resolve(schema)<br/>-> schema Namespace"]
-    RESOLVE --> READ["_read_tree(root):<br/>FileTree.read_from_filesystem<br/>+ .bidsignore filter"]
-    READ --> ITER["iter_file_contexts(tree, schema):<br/>one Context per file"]
-    ITER --> LOOP{"for each file context"}
-    LOOP --> IGN{"_is_ignored?<br/>(hidden / sourcedata /<br/>derivatives / code / stimuli)"}
-    IGN -- yes --> LOOP
-    IGN -- no --> EVAL["eval_context(...)<br/>-> EvalContext"]
-    EVAL --> ONE["_validate_one:<br/>integrity -> filename -><br/>inheritance -> apply_rules"]
-    ONE --> VIEW["collect_viewed:<br/>mark used sidecars/stimuli"]
-    VIEW --> LOOP
-    LOOP -- done --> DS["dataset_checks(tree, files,<br/>viewed_json, viewed_stimuli)"]
-    DS --> SUBJ{"any sub-* dirs?"}
-    SUBJ -- no --> NOSUBJ["add NO_SUBJECTS warning"]
-    SUBJ -- yes --> RECOMP
-    NOSUBJ --> RECOMP["report.recompute():<br/>severity + counts"]
-    RECOMP --> DONE["ValidationReport"]
-```
-
-Per-file work happens in `_validate_one` (`validate.py:168`), which runs four
-checkers in order and wraps them in a blanket `try/except` that turns any
-unexpected error into a single `bids_validator.internal_error` *warning*. One bad
-file can never abort the whole run.
-
-```mermaid
-flowchart LR
-    F["one file's EvalContext"] --> I["integrity_checks<br/>(empty / unreadable / gzip)"]
-    I --> N["filename_checks<br/>(rules.files: entities,<br/>suffix, extension, location)"]
-    N --> H["inheritance_checks<br/>(ambiguous / overridden sidecars)"]
-    H --> R["apply_rules<br/>(schema rules.checks / sidecars /<br/>tabular_data + value typing)"]
-    R --> V["FileVerdict (list of Issue)"]
-```
-
-`validate_file(root, relpath, ...)` (`validate.py:133`) reuses the same machinery
-but indexes the whole dataset (so inheritance and association resolution still
-work) and returns only the named file's `FileVerdict`.
-
-Default-ignored top directories (`sourcedata`, `derivatives`, `code`, `stimuli`)
-and hidden paths are filtered by `_is_ignored` (`validate.py:49`), matching the
-reference validator's defaults.
-
-## Schema resolution
-
-`validation/schema/resolve.py` is the only module that decides *which* schema is
-used. Everything else receives one resolved `Namespace`.
-
-```mermaid
-flowchart TD
-    SEL["resolve(selector)"] --> NONE{"selector is None?"}
-    NONE -- yes --> DEF["load_schema()<br/>installed bidsschematools<br/>(latest stable, the default)"]
-    NONE -- no --> URL{"is a URL?"}
-    URL -- yes --> FETCH["fetch + cache,<br/>then load_schema(path)"]
-    URL -- no --> PATH{"is an existing<br/>local path?"}
-    PATH -- yes --> LOCAL["load_schema(path):<br/>a schema.json or<br/>YAML source dir"]
-    PATH -- no --> BUNDLED{"a bundled<br/>version tag?"}
-    BUNDLED -- yes --> OFFLINE["load bundled<br/>schema/bundled/X.Y.Z.json"]
+    SEL["resolve(selector)"] --> NONE{"no selector?"}
+    NONE -- yes --> DEF["use the schema bundled with<br/>the installed bidsschematools<br/>(the default)"]
+    NONE -- no --> URL{"a URL?"}
+    URL -- yes --> FETCH["download, cache, and load it"]
+    URL -- no --> PATH{"an existing<br/>local path?"}
+    PATH -- yes --> LOCAL["load a schema.json<br/>or a schema source directory"]
+    PATH -- no --> BUNDLED{"a bundled<br/>version number?"}
+    BUNDLED -- yes --> OFFLINE["load schema/bundled/X.Y.Z.json"]
     BUNDLED -- no --> PUB{"'latest' or a<br/>published version?"}
     PUB -- yes --> FETCH
     PUB -- no --> ERR["raise SchemaNotAvailable"]
 ```
 
-- **Bundled, offline.** Six dereferenced schemas ship in
-  `validation/schema/bundled/` (1.8.0, 1.9.0, 1.10.0, 1.10.1, 1.11.0, 1.11.1).
-  `available_versions()` lists them, numerically sorted so `1.9.0` precedes
-  `1.10.0`. A leading `v` (`v1.11.1`) is accepted.
-- **Loading.** A bundled file, a local `schema.json`, or a YAML source directory
-  all go through `bidsschematools.schema.load_schema`, which picks the right
-  loader by inspecting the path. Loads are LRU-cached, so resolving the same
-  selector repeatedly is free.
-- **Fetch + cache.** `schema/cache.py` downloads `latest`, a non-bundled
-  version, or a URL from the BIDS specification site and caches it under
-  `$XDG_CACHE_HOME/bids-validator/schemas` (keyed by a hash of the URL), using
-  `certifi`'s CA bundle when available.
-- **Forward compatibility.** `EvalContext` reads the advertised context-variable
-  names defensively: modern schemas put them under `meta.context.properties`,
-  legacy 1.8.0/1.9.0 under `meta.context.context.properties`. An unknown shape
-  degrades to an empty key set, so an older schema validates with reduced
-  coverage instead of crashing.
+By default `resolve(None)` uses whatever schema the installed `bidsschematools`
+ships, which tracks the current stable BIDS version. Six dereferenced schemas are
+also bundled in `validation/schema/bundled/` (1.8.0 through 1.11.1), so a specific
+version can be selected without a network connection. A local `schema.json`, a
+schema source directory, or a remote URL all work too; downloaded schemas are
+cached on disk by [`schema/cache.py`](../src/bids_validator/validation/schema/cache.py).
 
-`schema_introspect.py` is the read-only vocabulary reader over a resolved schema:
-`datatypes()`, `suffixes()`, `extensions()` (longest-first so `.nii.gz` wins over
-`.gz`), `short_to_long()`, `entity_pattern()`, `metadata_by_name()`, and
-`directory_recordings()` (extensions ending in `/`, like `.ds`, `.mefd`,
-`.ome.zarr`). Results are memoized per schema `id()`.
+Once a schema is resolved,
+[`schema_introspect.py`](../src/bids_validator/validation/schema_introspect.py)
+is the small module that reads the vocabulary out of it: `datatypes()`,
+`suffixes()`, `extensions()` (longest first, so `.nii.gz` is matched before
+`.gz`), the entity short-and-long names, the value pattern for each entity, the
+metadata field definitions, and the set of "directory recordings" (formats like
+`.ds` and `.ome.zarr` that are directories on disk but represent a single
+recording). These results are cached per schema, so reading them repeatedly during
+a run is cheap.
 
-## The file model and per-file context
+Older schemas need one accommodation. The list of context-variable names lives at
+`meta.context.properties` in current schemas but one level deeper in 1.8.0 and
+1.9.0. The context object reads it from either place and falls back to an empty
+list if it finds neither, so an old schema runs (with reduced coverage) instead of
+raising.
 
-Three files build the per-file view the rule engine evaluates against.
+## Building the file tree
 
-### FileTree (`types/files.py`)
+Before any checking happens, the dataset's files are read into an in-memory tree.
+`FileTree.read_from_filesystem`
+([`types/files.py`](../src/bids_validator/types/files.py)) walks the directory once
+and builds an immutable tree of `FileTree` nodes, each wrapping a path. Doing this
+up front means the rest of the run never lists directories again; it only reads
+file contents, and those reads are cached.
 
-An immutable `attrs` tree over a `universal_pathlib` `UPath` (so the same model
-works over a local filesystem, a zip, or S3). `read_from_filesystem` materializes
-the whole tree up front in one directory pass, so later validation does zero
-directory listing, only cached content reads. `parent` and `children` are
-excluded from equality and hashing, which keeps the frozen tree hashable and
-therefore usable as a `@cache` key for the content loaders. Useful members:
-`relative_path` (POSIX, trailing slash on directories), `__contains__` (the
-membership test the `exists()` resolver relies on), and `__truediv__`.
+Two details matter later. A `FileTree` is hashable (its parent and children are
+excluded from equality), which lets it be used as a cache key for the content
+loaders. And `relative_path` gives a node's path from the dataset root, with a
+trailing slash on directories, which is the form the ignore patterns and the
+existence checks compare against.
 
-### The base context (`context.py`)
+Just before validation, `_read_tree` (`validate.py:57`) also applies the
+dataset's `.bidsignore` file, pruning any paths it lists (see
+[`bidsignore.py`](../src/bids_validator/bidsignore.py)). If the `.bidsignore`
+contains a pattern this code does not support (an inverted `!` line), it gives up
+on filtering and validates the unfiltered tree rather than risk hiding files; that
+fallback is deliberate.
 
-The single I/O path. Module-level, cached loaders are the only place file
-*contents* are read:
+## Turning one file into a context
 
-- `load_tsv` / `load_tsv_gz` open with `utf-8-sig` (BOM-safe), transpose rows to
-  columns, and drop fully-blank lines so a trailing newline neither adds a
-  spurious value nor truncates the transpose.
-- `load_json` (orjson), `load_nifti_header` (the only header reader; normalizes
-  nibabel quirks but keeps numpy arrays), `load_sidecar` (inheritance-principle
-  merge of JSON sidecars, nearer files winning).
+The schema's rules are written against named variables: a rule might say "this
+applies when `suffix == 'T1w'`" or "`RepetitionTime` must be in `sidecar`". To
+evaluate such a rule for a given file, the engine first builds an object that maps
+those names (`suffix`, `datatype`, `sidecar`, `nifti_header`, `columns`,
+`entities`, and so on) to the file's actual values. That object is the file's
+context.
 
-`Context` (`context.py:388`) is the lazy per-file view: `path`, `entities`,
-`datatype`, `suffix`, `extension`, `size`, `columns`, `json`, `nifti_header`,
-`sidecar`. `FileParts.from_file` parses a filename; a no-hyphen token (the
-`dataset` in `dataset_description.json`) becomes an entity with value `None`,
-which matters downstream.
+It is built in two layers. The base layer is `Context`
+([`context.py`](../src/bids_validator/context.py)), which parses the filename into
+entities, datatype, suffix, and extension (`FileParts.from_file`) and lazily reads
+file contents through a small set of cached loaders (`load_json`, `load_tsv`,
+`load_nifti_header`, `load_sidecar`). These loaders are the only place file
+contents are read, so each file is read at most once.
 
-### EvalContext (`validation/context.py`)
-
-A read-only `Mapping` the rule engine evaluates expressions against. It delegates
-every base variable to `Context` (preserving the single I/O path) and intercepts
-exactly five keys so the evaluator only ever sees native types and correct
-semantics:
+The second layer is `EvalContext`
+([`validation/context.py`](../src/bids_validator/validation/context.py), line 89),
+a read-only mapping that the rule engine actually evaluates against. It forwards
+most names straight to the base `Context`, but it intercepts a few where the raw
+value would either have the wrong Python type for the expression language or would
+break a BIDS rule:
 
 ```mermaid
 flowchart TD
-    GET["EvalContext[key]"] --> EX{"key == exists resolver?"}
-    EX -- yes --> RES["return the (item, rule) -> bool resolver"]
-    EX -- no --> CACHE{"cached?"}
+    GET["EvalContext[name]"] --> CACHE{"already computed?"}
     CACHE -- yes --> RET["return cached value"]
-    CACHE -- no --> K{"which key?"}
-    K -- associations --> ASSOC["build_associations(base)<br/>(lazy, only if a rule reads it)"]
-    K -- nifti_header --> NIFTI["numpy -> native lists;<br/>unreadable -> null;<br/>read_headers=False -> null"]
-    K -- columns --> COLS["tuples -> lists"]
-    K -- "sidecar (on a .json file)" --> EMPTY["empty: a .json IS a sidecar,<br/>so it has none of its own"]
-    K -- entities --> ENT["drop None-valued tokens,<br/>keep empty-label ''"]
-    K -- other --> DELEG["getattr(base, key)"]
+    CACHE -- no --> K{"which name?"}
+    K -- nifti_header --> NIFTI["convert numpy arrays to plain lists;<br/>an unreadable header becomes null"]
+    K -- columns --> COLS["convert column tuples to lists"]
+    K -- associations --> ASSOC["find the companion files<br/>(built only if a rule reads them)"]
+    K -- "sidecar, on a .json file" --> EMPTY["empty: a .json file is itself a<br/>sidecar, so it has none of its own"]
+    K -- entities --> ENT["drop name-only tokens like 'dataset';<br/>keep an empty label such as 'acq-'"]
+    K -- anything else --> DELEG["forward to the base Context"]
 ```
 
-Why each interception exists:
+Each interception has a concrete reason:
 
-- **`nifti_header` numpy to native.** The expression language indexes header
-  fields as plain-number arrays. An un-indexable numpy array would silently yield
-  `null` and produce a false positive on *every* NIfTI; flattening here keeps
-  numpy out of the evaluator.
-- **`sidecar` empty on a `.json`.** A JSON file *is* a sidecar, so by the
-  inheritance principle it has no sidecar of its own. This also prevents
-  double-reporting a data file's metadata (checked once via the data file).
-- **`entities` drops `None`.** The no-hyphen `dataset` token is not a BIDS
-  entity; dropping it avoids a phantom `FILENAME_MISMATCH`. An empty label `""`
-  is kept because that is itself a finding.
+- The expression language indexes the NIfTI header as plain numbers. The loader
+  keeps numpy arrays for efficiency, but a numpy array indexed by the expression
+  language would silently produce no value, which would make a header rule look
+  failed on every NIfTI. Converting to plain lists here avoids that.
+- A `.json` file is a sidecar. By the BIDS inheritance principle a sidecar does
+  not have a sidecar of its own, so reading `sidecar` on a `.json` file returns
+  empty. This also stops a data file's metadata from being checked twice, once via
+  the data file and once via its sidecar.
+- A filename token with no value, such as the `dataset` in
+  `dataset_description.json`, is parsed as an entity with no label. It is not a
+  real entity, so it is dropped; an empty label such as `acq-` is kept, because
+  that is itself a problem the rules should catch.
 
-`iter_file_contexts` + `_walk` (`validation/context.py:222`) turn a `FileTree`
-into one `Context` per file. The crucial guard: a directory recording
-(`.ds`/`.mefd`/`.ome.zarr`, discovered from the schema, not hardcoded) is yielded
-as **one** context and **not descended into**, so its internal chunks are never
-flagged as stray empty files.
+Producing one context per file is `iter_file_contexts` (`validation/context.py:222`).
+It walks the tree and yields a `Context` for each file. There is one special case:
+a directory recording such as `sub-01_task-rest_meg.ds` is a directory on disk but
+represents a single recording, so it is yielded as one context and not descended
+into. Without this, the files inside it would be checked individually and reported
+as stray empty files.
 
-## The expression engine
+## Evaluating the schema's expressions
 
-`validation/expressions.py` is the evaluator for the BIDS schema expression
-language (selectors like `suffix == 'T1w'` and checks like
-`"RepetitionTime" in sidecar`). Parsing is delegated to
-`bidsschematools.expressions.parse`; this module walks the AST against a context.
+Many of the schema's rules are short expressions: a selector like
+`suffix == 'bold'` that says when a rule applies, and a check like
+`"RepetitionTime" in sidecar` that says what must be true. These are evaluated by
+[`validation/expressions.py`](../src/bids_validator/validation/expressions.py).
+Parsing the expression text into a syntax tree is done by `bidsschematools`; this
+module walks that tree against a context and returns a value.
 
 ```mermaid
 flowchart TD
-    S["evaluate_string(expr, context)"] --> P["_parse_cached(expr)<br/>(LRU-cached parse)"]
-    P --> E["evaluate(node, context)"]
-    E --> D{"node type"}
-    D -- "Array/Object/Property/Element" --> COMP["compound handler<br/>(null propagates)"]
-    D -- "Function" --> FN["_eval_function"]
-    D -- "BinOp/RightOp" --> OP["operators<br/>(&&/|| short-circuit, JS semantics)"]
-    D -- "int/float" --> NUM["return as-is"]
-    D -- "str" --> ATOM["_atom: literal / keyword /<br/>variable lookup"]
-    FN --> KNOWN{"is_known(name)?"}
-    KNOWN -- no --> UF["raise UnknownFunction"]
-    KNOWN -- yes --> CALL["evaluate args, call;<br/>IndexError/TypeError/ValueError -> null"]
+    S["evaluate_string(expr, context)"] --> P["parse the text into a tree<br/>(cached, so each expression<br/>is parsed once)"]
+    P --> E["walk the tree"]
+    E --> D{"node kind"}
+    D -- "a name like suffix" --> LK["look it up in the context<br/>(absent name -> null)"]
+    D -- "a literal" --> LIT["return the literal"]
+    D -- "a && b, a == b, ..." --> OP["combine the operands"]
+    D -- "a function call" --> FN["call one of the built-in functions"]
 ```
 
-Key design points:
+The most important behaviour to understand is what happens when something cannot
+be determined. Looking up a name that is not in the context returns `null`
+(Python `None`), not an error. From there, `null` spreads: indexing `null`,
+reading a field of `null`, or doing arithmetic with `null` all return `null`. And
+operations that could otherwise raise, a malformed regular expression, a division
+by zero, a number stored as text, are caught and also turned into `null`.
 
-- **Null means "not determinable".** A missing variable resolves to `None`
-  (`_lookup` returns `None` on absence); `null.x`, `null[i]`, and arithmetic or
-  ordering with a null operand all propagate `null`. Operations that *could*
-  raise (bad regex, zero division, wrong arity, non-numeric coercion) are caught
-  and degraded to `null`. The rule engine then skips a null result.
-- **JavaScript semantics, deliberately.** `truthy()` mirrors JS (empty `[]` and
-  `{}` are truthy; empty string is falsy); `&&`/`||` return the operand, not a
-  coerced bool; `_equal` treats `null` as equal only to `null`. The schema was
-  authored against the JS reference, so matching it exactly is correctness.
-- **A 13-function table** (`_FUNCTIONS`) implements `type`, `intersects`,
-  `match`, `substr`, `min`, `max`, `length`, `unique`, `count`, `index`,
-  `allequal`, `sorted`, and `exists`. Keeping it an explicit table makes the
-  supported set auditable against the schema. An unknown function (a
-  newer-than-engine schema) raises `UnknownFunction` (a subclass of
-  `EvaluationError`, so existing handlers skip the rule for free).
-- **`sorted` is position-preserving for non-numbers** (`_numeric_sorted`). A
-  comparator that maps every NaN comparison to "equal" is not a valid total
-  order, so a `cmp_to_key` sort is algorithm-dependent and diverged between
-  CPython 3.10 and 3.11+. The position-preserving implementation is deterministic
-  across Python versions. (The same class of bug was fixed in bidsval.)
-- **Correctness oracle.** The 77 `meta.expression_tests` vectors in the schema
-  pin the evaluator's semantics; `tests/validation/test_expressions.py`
-  parametrizes over all of them.
+This matters because of how the rule engine treats `null`, described in the next
+section: a check that evaluates to `null` is skipped rather than reported. The
+reason is the target stated in [what-changed.md](what-changed.md): this validator
+is meant to agree with the reference validator, and reporting a problem the data
+does not actually have is worse than missing one. So whenever the engine cannot be
+sure, it stays quiet. You will see this same choice in several of the Python
+checks below.
 
-The one exception to null-skip: `exists()` returns `0` (not `null`) when no
-file-tree resolver is wired, so an existence check fails-as-absent rather than
-skipping. In normal validation the resolver is always supplied by
-`eval_context`.
+A few details are worth knowing if you read this module. It follows JavaScript
+semantics, not Python's, because the schema was written against the JavaScript
+reference validator: an empty list or object is truthy, an empty string is falsy,
+and `&&` and `||` return one of their operands rather than a boolean. There is a
+fixed table of thirteen built-in functions (`type`, `match`, `count`, `intersects`,
+`exists`, and so on); a function the schema uses that this table does not know
+raises a distinct error so the rule engine can skip that rule. The semantics are
+pinned by a set of test vectors that ship inside the schema itself
+(`meta.expression_tests`), which `tests/validation/test_expressions.py` runs.
 
-## The rule engine
+## Running the rules
 
-`validation/engine.py::apply_rules` (`engine.py:71`) is the schema-rule
-interpreter. It evaluates four rule groups for one file:
-`checks` (generic selector-gated booleans), `sidecars` and `dataset_metadata`
-(required/recommended field rules), and `tabular_data` (TSV column rules).
+With a context for a file and a way to evaluate expressions, the rule engine
+([`validation/engine.py`](../src/bids_validator/validation/engine.py), line 71,
+`apply_rules`) runs the schema's rules against that file. The schema groups its
+rules; this engine evaluates four groups: generic boolean checks, required and
+recommended sidecar fields, dataset-description fields, and TSV column rules.
+
+For each rule the engine first decides whether the rule applies (its selectors),
+then runs what the rule asserts:
 
 ```mermaid
 flowchart TD
-    AR["apply_rules(schema, context)"] --> DESC["_descend each rule group"]
-    DESC --> RULE{"node has 'selectors'?"}
-    RULE -- no --> DESC
-    RULE -- yes --> EVALU{"_is_evaluable?<br/>(no unpopulated fields)"}
-    EVALU -- no --> SKIPR["skip rule"]
-    EVALU -- yes --> SELS{"all selectors pass?"}
-    SELS -- "no / EvaluationError" --> SKIPR
-    SELS -- yes --> CH["_eval_checks:<br/>null -> skip, falsy -> one finding"]
-    CH --> FLD["_eval_fields:<br/>missing required/recommended"]
-    FLD --> COLS["eval_columns<br/>(tabular_data only)"]
-    COLS --> VALS["_validate_present_values<br/>(.json files only)"]
-    VALS --> DEDUP["_dedupe -> list of Issue"]
+    R["a schema rule"] --> EVAL{"does the rule mention<br/>something not built yet?"}
+    EVAL -- yes --> SKIP["skip the rule"]
+    EVAL -- no --> SEL{"do all selectors pass?"}
+    SEL -- "no, or cannot be evaluated" --> SKIP
+    SEL -- yes --> CH["run its checks:<br/>a null result is skipped,<br/>a false result is one finding"]
+    CH --> FLD["report missing required<br/>or recommended fields"]
+    FLD --> COL["for a TSV rule, check its columns"]
 ```
 
-How each piece works:
+The pieces:
 
-- **`_eval_checks`** (`engine.py:156`): a rule's checks are an AND; the first
-  determinate falsy check emits exactly one finding. A `null` check is skipped
-  (not determinable); an `EvaluationError` skips that check.
-- **`_eval_fields`** (`engine.py:211`): for `sidecars` (read the data file's
-  inheritance-merged sidecar) and `dataset_metadata` (read
-  `dataset_description.json`), emit a finding for each required (`ERROR`) or
-  recommended (`WARNING`) field that is absent. `optional`/`prohibited` map to
-  `IGNORE`. A conditional `level_addendum` ("required if X is Y") is honoured.
-  Files that cannot carry a sidecar (`.json`, `.md`, ...) are exempt.
-- **`_validate_present_values`** (`engine.py:296`): runs only on `.json` files,
-  validating each present field's value against its
-  `schema.objects.metadata` definition. A field name may map to several
-  definitions; a finding is emitted only when the value fails *every* one, so
-  duplicate field names never cause a false positive. Restricting to `.json`
-  files avoids double-reporting a data file's merged-sidecar values.
-- **`_UNPOPULATED_FIELDS`** (`engine.py:50`): a regex skip gate for rules that
-  reference context aggregates not built yet (`gzip`, `ome`, `tiff`,
-  `coordsystems`, `atlas_description`). The word boundary leaves the singular
-  `coordsystem` association untouched.
+- A rule's checks are combined with "and": the first one that is definitely false
+  produces one finding, and a check that comes back `null` is skipped, as
+  described above (`_eval_checks`, `engine.py:156`).
+- Field rules (`_eval_fields`, `engine.py:211`) report a missing required field as
+  an error and a missing recommended field as a warning, reading the data file's
+  merged sidecar (or, for the dataset group, `dataset_description.json`). Optional
+  and prohibited fields produce nothing.
+- The value of a field that is present is checked separately
+  (`_validate_present_values`, `engine.py:296`), and only on `.json` files, against
+  its schema definition. Checking only the `.json` file avoids reporting the same
+  bad value twice. A field name can map to several definitions; a value is only
+  flagged if it fails all of them, so a name that is reused in different contexts
+  is not falsely flagged.
+- A small list of rules that reference aggregates this engine does not build yet
+  (for example `coordsystems` or `atlas_description`) is skipped wholesale
+  (`_UNPOPULATED_FIELDS`, `engine.py:50`), again to avoid evaluating a rule against
+  data that is not there.
 
-## The hand-ported rule families
+## Checks written directly in Python
 
-Some checks need more than a boolean schema expression. These are ported by hand
-from the reference validator's TypeScript, each a strict subset of its findings.
+Some checks cannot be expressed as a schema boolean, so they are written by hand,
+ported from the reference validator. Each is a small module under
+[`validation/rules/`](../src/bids_validator/validation/rules/), and each returns a
+list of findings for one file. They run in a fixed order:
 
-### Integrity (`rules/integrity.py`)
+```mermaid
+flowchart LR
+    F["one file's context"] --> I["integrity"]
+    I --> N["filenames"]
+    N --> H["inheritance"]
+    H --> R["the schema rules<br/>(apply_rules)"]
+    R --> V["that file's findings"]
+```
 
-Per-file structural problems that occur before any schema rule can apply:
-`EMPTY_FILE`, `NIFTI_HEADER_UNREADABLE`, `INVALID_GZIP`, all at `ERROR` (matching
-the reference). Two non-obvious points:
+**Integrity** ([`rules/integrity.py`](../src/bids_validator/validation/rules/integrity.py))
+catches files that are broken before any schema rule could apply: an empty file, a
+NIfTI whose header cannot be read, a corrupt gzip. Two points are worth noting. A
+symlink is skipped, because an unfetched git-annex file is a symlink with no local
+content and must not be reported as empty. And an empty NIfTI produces both an
+"empty file" and an "unreadable header" finding, because the reference validator
+reports both; the two checks do not suppress each other. The header check only
+runs when header reading is enabled, so the fast `--no-headers` mode does not
+falsely flag every NIfTI.
 
-- **A symlink is skipped** (`integrity.py:54`): an unfetched git-annex file is a
-  symlink with no local content and must never be reported as empty or
-  unreadable. This is the module's central never-false-positive guard.
-- **An empty NIfTI emits both** `EMPTY_FILE` and `NIFTI_HEADER_UNREADABLE`,
-  because the reference does: the checks do not gate each other. The header check
-  is gated on `read_headers`, so the fast structural pass (`--no-headers`) does
-  not falsely flag every NIfTI.
+**Filenames** ([`rules/filenames.py`](../src/bids_validator/validation/rules/filenames.py))
+checks a path against the schema's filename rules: which rule the file matches, and
+then its entities, labels, suffix, extension, datatype folder, and location. A file
+that matches no rule is reported as not included. This is the same job the old
+`is_bids` does, but it produces findings instead of a boolean, and `validate` uses
+this one so the two never report the same thing. Derivative filename rules are
+skipped, because the default run validates raw files only.
 
-### Filenames (`rules/filenames.py`)
+**Inheritance**
+([`rules/inheritance.py`](../src/bids_validator/validation/rules/inheritance.py))
+reports two problems about how JSON sidecars apply to a data file: when more than
+one sidecar in a directory could apply and none is an exact match (an error,
+because which one wins is ambiguous), and when a less specific sidecar sets a field
+that a more specific one overrides (a warning). It is evaluated from the data
+file's point of view, never from a sidecar's, so nothing is reported twice.
 
-Filename and path legality against `rules.files`. It finds which rule(s) a file
-matches, then checks entities, labels, suffix, extension, datatype folder, and
-location. No match yields `NOT_INCLUDED`. Derivative rules
-(`rules.files.deriv.*`) are unconditionally skipped, since default validation
-covers raw files only. Notable guards: `INVALID_ENTITY_LABEL` fires only when the
-schema actually supplies a value pattern; `MISSING_REQUIRED_ENTITY` is suppressed
-for a shared sidecar at the dataset root; when several rules match,
-`ALL_FILENAME_RULES_HAVE_ISSUES` is suppressed if the file cleanly satisfies any
-one of them. Every finding here is `ERROR`. This is the schema-rule companion to
-the legacy `BIDSValidator.is_bids`; `validate` uses this one so the two never
-double-report.
+**Tabular data** ([`rules/tables.py`](../src/bids_validator/validation/rules/tables.py),
+with helpers in `column_types.py` and `values.py`) checks a TSV's columns: that
+required columns are present, that extra columns follow the rule's policy, that
+index columns are unique, that the first columns are in the required order, and
+that each cell has the right type. A column with a wrong-typed cell produces one
+finding (matching the reference's count), but it records every offending row so a
+tool can highlight them all. Gzipped TSVs are skipped, because they have no header
+row (their column names live in a sidecar), and a column whose value is free text,
+or whose pattern will not compile, is accepted rather than flagged. The
+human-readable "how to fix" text on a finding is generated from the schema
+definition itself (`guidance.py`), so the examples stay correct as the schema
+changes.
 
-### Inheritance (`rules/inheritance.py`)
+## Looking across the whole dataset
 
-Two findings about how JSON sidecars apply to a data file, evaluated from the data
-file's perspective: `MULTIPLE_INHERITABLE_FILES` (`ERROR`, an ambiguous set of
-applicable sidecars with no exact entity match) and `SIDECAR_FIELD_OVERRIDE`
-(`WARNING`, a less-specific sidecar sets a field a more-specific one overrides).
-The companion `applicable_sidecar_files` resolves the one winning sidecar per
-ancestor level and feeds the dataset-level "viewed" tracking.
+After every file has been checked on its own, a few checks need to see the dataset
+as a whole. These run from `dataset_checks`
+([`rules/dataset_checks.py`](../src/bids_validator/validation/rules/dataset_checks.py)):
 
-### Tabular data (`rules/tables.py`, `column_types.py`, `values.py`, `guidance.py`)
+- two paths that differ only by case, which collide on a case-insensitive
+  filesystem (an error);
+- a `.json` sidecar that no data file uses (an error);
+- a file under `stimuli/` that no `events.tsv` references (a warning);
+- a `CITATION.cff` that is present but malformed
+  ([`rules/citation.py`](../src/bids_validator/validation/rules/citation.py)).
 
-`eval_columns` turns one `tabular_data` rule plus a file's parsed columns into
-findings: required-column presence (`TSV_COLUMN_MISSING`), extra-column policy
-(`allowed`/`allowed_if_defined`/`not_allowed`), index uniqueness, initial-column
-ordering, the deprecated `89+` age value, and per-column value typing. Value
-typing is one finding per column (`TSV_VALUE_INCORRECT_TYPE`, matching the
-reference's count) with every offending row in `Issue.lines` so a GUI can
-highlight all bad cells. `.tsv.gz` files are skipped entirely (they are
-headerless; their columns are named by the sidecar). `column_types.py` compiles a
-column's effective constraints (refining the schema signature with the sidecar,
-where a sidecar may only narrow, never widen), and an unparseable pattern falls
-back to "accept everything". `values.py` validates JSON scalar values against
-`schema.objects.metadata` with a pragmatic subset of JSON Schema (type, enum,
-numeric bounds, array items, `anyOf`). `guidance.py` synthesises the "how to fix"
-text from the definition itself, so examples stay correct as the schema evolves.
+`validate` itself adds one more, a warning when the dataset has no `sub-*`
+directories at all.
 
-### Dataset-level (`rules/dataset_checks.py`, `citation.py`, `bidsignore.py`)
+Deciding whether a sidecar or a stimulus is "used" is the subtle part. Rather than
+recompute it, the engine records which sidecars and stimuli the per-file pass
+actually resolved, as it resolves them (`collect_viewed`), and the dataset-level
+check then flags only what was never touched. This way a file counts as used
+exactly when the reference validator would count it.
 
-After the per-file pass, `dataset_checks` runs four cross-file checks:
-`CASE_COLLISION` (paths differing only by case, an `ERROR` for case-insensitive
-filesystems), `SIDECAR_WITHOUT_DATAFILE` (a `.json` no data file uses, `ERROR`),
-`UNUSED_STIMULUS` (`stimuli/` files no `events.tsv` references, `WARNING`), and
-`CITATION_CFF_VALIDATION_ERROR`. The `NO_SUBJECTS` warning is added by `validate`
-itself.
-
-The correctness key here is that "used" is *replayed, not recomputed*:
-`collect_viewed` records which sidecars and stimuli the per-file pass actually
-resolved (via inheritance and associations), so a file counts as used exactly
-when the reference validator would count it. `citation.py` only checks what cannot
-false-positive: valid YAML, a mapping, and the three keys CFF always requires;
-every environmental ambiguity (missing, empty, symlink, unreadable) is skipped.
-`bidsignore.py` prunes the `FileTree` by `.gitignore`-style patterns before
-validation; an unsupported inverted (`!`) pattern raises, and `_read_tree` catches
-it to validate the unfiltered tree rather than risk hiding files.
-
-## Associations
-
-`validation/associations.py::build_associations` resolves, for one data file, the
-companion files that travel with it (events, bval/bvec, channels, ASL context,
-fieldmap magnitudes, coordsystem/electrodes, physio) and exposes each under
-`associations.<name>` so schema expressions can read its columns and fields. It is
-built lazily (only when a rule reads `associations`) and cached per file.
+Some of these checks reach files through associations. An association is a
+companion file that travels with a data file: an `events.tsv` next to a recording,
+the `.bval`/`.bvec` next to a diffusion image, the `channels.tsv` next to an EEG
+file, and so on.
+[`validation/associations.py`](../src/bids_validator/validation/associations.py)
+finds them for a given data file and exposes their columns and fields to the
+expression language under `associations`. It is built only when a rule actually
+reads `associations`, and an association that is not found is simply left out, so a
+rule that mentions a missing association is skipped rather than failed.
 
 ```mermaid
 flowchart TD
-    BA["build_associations(context)"] --> SUF{"file has a suffix?"}
-    SUF -- no --> EMPTY["return {}"]
-    SUF -- yes --> SPEC["for each schema association spec"]
-    SPEC --> GATE{"name in _BUILT allowlist?"}
-    GATE -- no --> SPEC
-    GATE -- yes --> SEL{"selectors pass?"}
+    BA["build_associations(file)"] --> SUF{"does the file<br/>have a suffix?"}
+    SUF -- no --> EMPTY["nothing to associate"]
+    SUF -- yes --> SPEC["for each association the schema defines"]
+    SPEC --> SEL{"does it apply to this file?"}
     SEL -- no --> SPEC
-    SEL -- yes --> FIND["_find_target:<br/>proximity + entity-subset +<br/>most-specific wins"]
-    FIND -- "found" --> ADD["expose columns/fields/path"]
-    FIND -- "None" --> SPEC
+    SEL -- yes --> FIND["search nearby for the companion file<br/>(closest, most specific match)"]
+    FIND -- found --> ADD["expose its columns / fields"]
+    FIND -- "not found" --> SPEC
 ```
 
-The `_BUILT` allowlist is the explicit boundary of "associations we can build
-correctly". Two schema names (`atlas_description`, `coordsystems`, the plural
-aggregate) are deliberately left out so any rule referencing them sees a missing
-key and is skipped, rather than the module fabricating a partial aggregate. An
-absent association is simply not added to the output, so `associations.<name>`
-resolves to `null` downstream and its rules skip.
+## The result and how it is shown
 
-## The result model and renderers
+The findings are plain data objects, so a report can be turned into text, JSON, or
+anything else without re-running validation.
 
-Findings are pure-data `attrs` records, so a report serialises cleanly and binds
-to a CLI, a GUI, or a machine-readable format.
+- An `Issue`
+  ([`issues.py`](../src/bids_validator/validation/issues.py)) is one finding: a
+  `code`, a `severity` (`ignore`, `warning`, or `error`), a `location`, an optional
+  message, and an optional "how to fix" suggestion. It also carries two extras the
+  reference validator does not have: where in the schema the finding came from, and
+  a machine-readable hint a tool could use to offer a fix.
+- A `FileVerdict` holds one file's findings; a `ValidationReport`
+  ([`report.py`](../src/bids_validator/validation/report.py)) holds the whole run:
+  the BIDS version checked against, the per-file verdicts, the dataset-level
+  findings, and the counts. `is_valid` means no errors; `filtered(...)` returns a
+  copy keeping only chosen severities.
 
-- **`Issue`** (`issues.py:108`): `code`, `severity` (a `Severity` enum,
-  `IGNORE < WARNING < ERROR`), `location`, `sub_code`, `message`, `suggestion`,
-  `rule`, `line`/`lines` (tabular row highlighting), plus two extras beyond the
-  reference: `provenance` (the selectors and checks that produced it, for an
-  "explain" feature) and `fix` (a machine-actionable remediation hint).
-- **`FileVerdict`** holds one file's `path`, rolled-up `severity`, and `issues`.
-- **`ValidationReport`** (`report.py:44`) holds `bids_version`,
-  `schema_version`, `dataset_issues`, `files`, `severity`, and per-finding
-  `counts`. `recompute()` rolls up severity and counts (every finding counted
-  once); `is_valid` is "no errors"; `filtered(severities)` returns a copy keeping
-  only chosen severities (validity is unaffected, it always depends on errors).
+Four renderers in [`validation/render/`](../src/bids_validator/validation/render/)
+turn a report into output: plain text (what the command line prints), JSON (a flat
+list of findings with the run's metadata), SARIF (for code-scanning tools), and a
+single self-contained HTML file. Each is a plain function of the report, listed in
+one registry the command line dispatches from.
 
-Four renderers in `validation/render/` are pure functions of a report:
-`to_text` (the CLI summary), `to_json`/`to_dict` (a flat shape: metadata, counts,
-one `issues` list), `to_sarif` (SARIF 2.1.0 for code scanning), and `to_html` (a
-self-contained document). The format-to-renderer registry (`RENDERERS`,
-`EXTENSIONS`) is the single source the CLI dispatches from.
+## The full pipeline, end to end
 
-## Module map
+Putting the stages together, here is the whole of `validate` in one picture:
+
+```mermaid
+flowchart TD
+    START["validate(root, schema, read_headers)"] --> RESOLVE["resolve the schema"]
+    RESOLVE --> READ["read the file tree<br/>and apply .bidsignore"]
+    READ --> ITER["build one context per file"]
+    ITER --> LOOP{"for each file"}
+    LOOP --> IGN{"in an ignored area?<br/>(hidden, sourcedata,<br/>derivatives, code, stimuli)"}
+    IGN -- yes --> LOOP
+    IGN -- no --> ONE["integrity, filenames,<br/>inheritance, then the schema rules"]
+    ONE --> VIEW["note which sidecars<br/>and stimuli it used"]
+    VIEW --> LOOP
+    LOOP -- "done" --> DS["dataset-wide checks:<br/>collisions, orphan sidecars,<br/>unused stimuli, citation"]
+    DS --> SUB{"any subjects?"}
+    SUB -- no --> NS["add a no-subjects warning"]
+    SUB -- yes --> RC
+    NS --> RC["compute the severity and counts"]
+    RC --> REP["ValidationReport"]
+```
+
+The per-file step (`_validate_one`, `validate.py:168`) runs the four checkers in
+the order shown and wraps them so that an unexpected error on one file becomes a
+single warning rather than stopping the run. The top-level directories `sourcedata`,
+`derivatives`, `code`, and `stimuli`, and any hidden path, are skipped by default
+(`_is_ignored`, `validate.py:49`), matching the reference validator.
+
+## Module layout
 
 ```
 validation/
-  validate.py        orchestration: validate() / validate_file()
-  engine.py          the schema-rule interpreter (apply_rules)
-  expressions.py     the schema expression evaluator (+ the 13-function table)
-  context.py         EvalContext + iter_file_contexts (the engine-facing context)
-  associations.py    build_associations (companion-file resolution)
-  schema_introspect.py   read BIDS vocabulary out of a schema
+  validate.py        the run: validate() and validate_file()
+  engine.py          runs the schema's rules against a file (apply_rules)
+  expressions.py     evaluates one schema expression (and the built-in functions)
+  context.py         EvalContext and the per-file walk (iter_file_contexts)
+  associations.py    finds a file's companion files
+  schema_introspect.py   reads BIDS vocabulary out of a schema
   schema/            schema selection: resolve.py, cache.py, bundled/*.json
   rules/
-    integrity.py     EMPTY_FILE / NIFTI_HEADER_UNREADABLE / INVALID_GZIP
-    filenames.py     rules.files: entities, suffix, extension, location
-    inheritance.py   ambiguous / overridden sidecars
-    tables.py        TSV column presence/order/index/value-typing
-    column_types.py  the value-signature compiler + cell checker
-    values.py        JSON metadata value typing
-    guidance.py      schema-sourced "how to fix" text
-    dataset_checks.py  case collisions, orphan sidecars, unused stimuli
+    integrity.py     empty / unreadable / corrupt files
+    filenames.py     filename and path legality
+    inheritance.py   ambiguous or overridden sidecars
+    tables.py        TSV columns and cell types
+    column_types.py  the column value-type checker
+    values.py        JSON value-type checking
+    guidance.py      the "how to fix" text, from the schema
+    dataset_checks.py  collisions, orphan sidecars, unused stimuli
     citation.py      CITATION.cff
   render/            text / json / sarif / html
-  report.py          ValidationReport, FileVerdict
-  issues.py          Issue, Severity, Fix, RuleProvenance, DatasetIssues
+  report.py          ValidationReport and FileVerdict
+  issues.py          Issue, Severity, and the small data types
 
-context.py           base Context + the cached content loaders (single I/O path)
+context.py           the base per-file context and the cached file loaders
 types/files.py       the immutable FileTree
 bidsignore.py        .bidsignore pattern matching
-bids_validator.py    the legacy is_bids filename check (unchanged)
+bids_validator.py    the original is_bids filename check (unchanged)
 ```
 
-The dependency direction is strict: `schema_introspect` and `schema/` import
-nothing from the rest of the engine; the rule families import the engine context
-and expression evaluator; `validate.py` wires them together. There is no `Pipeline`
-class and no module-level mutable state beyond the per-schema memo caches.
+The dependencies run one way. `schema_introspect.py` and `schema/` read a schema
+and depend on nothing else in the engine; the rule modules use the context and the
+expression evaluator; `validate.py` wires them together. There is no central
+controller object and no shared mutable state beyond the per-schema caches, so each
+piece can be read and tested on its own.

@@ -4,15 +4,15 @@ How closely python-validator reproduces the reference
 [Deno validator](https://github.com/bids-standard/bids-validator), measured on a
 real corpus at the latest stable BIDS schema and several older versions.
 
-The goal of this project is **faithful parity with the reference validator**: the
-same findings, at the same severities, so a tool can swap the standalone Deno
-binary for an in-process Python call without its behaviour changing. The headline
-result is **99.9% of Deno's error findings reproduced at exact severity, with 94
-of 115 datasets at exact error parity, and no code-level false positives on raw
-datasets.**
+The aim is to match the reference validator: the same findings, at the same
+severities, so a tool can use this in-process instead of calling the Deno binary
+and get the same result. At the latest stable schema, python-validator reproduces
+99.9% of Deno's error findings at exact severity, 94 of the 115 datasets have an
+identical set of errors, and there is no error code it emits on a raw dataset that
+Deno never emits.
 
 - [Methodology](#methodology)
-- [Headline: BIDS 1.11.1 (latest stable)](#headline-bids-1111-latest-stable)
+- [BIDS 1.11.1 (the latest stable schema)](#bids-1111-the-latest-stable-schema)
 - [Across schema versions](#across-schema-versions)
 - [Schemas Deno cannot load](#schemas-deno-cannot-load)
 - [The known over-emission](#the-known-over-emission)
@@ -38,7 +38,7 @@ datasets.**
   python-validator emits somewhere that Deno never emits anywhere. On raw
   datasets this is zero.
 
-## Headline: BIDS 1.11.1 (latest stable)
+## BIDS 1.11.1 (the latest stable schema)
 
 All three validators (Deno, [bidsval](https://github.com/karellopez/bidsval), and
 python-validator) over the 115-dataset corpus at matched schema BIDS 1.11.1.
@@ -181,8 +181,8 @@ bids-validator-deno --format json -s v1.11.1 DATASET > deno.json
 
 Then diff their `(location, code)` error sets. To sweep the whole corpus and
 every schema version, the harness scripts used for the numbers above
-(`three_way_compare.py` for the headline, `multiversion_compare.py` for the
-per-version sweep) run all validators over the
+(`three_way_compare.py` for the 1.11.1 three-way, `multiversion_compare.py` for
+the per-version sweep) run all validators over the
 [bids-examples](https://github.com/bids-standard/bids-examples) corpus at a
 matched schema and aggregate the per-pair metrics. They are kept with the test
 outputs rather than in the package, since they depend on a local Deno binary and

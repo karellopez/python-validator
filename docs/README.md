@@ -14,46 +14,54 @@ check is preserved and unchanged.
 
 ## What it does
 
-- **Validates dataset content**, not just filenames: required and recommended
-  sidecar fields, JSON value types, TSV columns and their value types, file
-  associations (events, bval/bvec, channels, ASL, coordinate systems, empty-room
-  recordings), inheritance, and dataset-level rules.
-- **Speaks the schema.** Every rule, entity, suffix, extension, and field
-  definition is read from the BIDS schema at runtime. Nothing about BIDS is
-  hardcoded, so the validator tracks the standard as the schema evolves.
-- **Reproduces the reference validator.** On a 115-dataset corpus it reaches
-  99.9% of the Deno validator's error findings at exact severity, with no
-  code-level false positives on raw datasets. See [benchmarks.md](benchmarks.md).
-- **Never raises on a bad dataset.** Every problem is a typed finding; one
-  unreadable file cannot abort a run.
-- **Selects any BIDS schema version.** Six versions (1.8.0 through 1.11.1) ship
-  bundled for offline use; a local, forked, or remote schema also works. See
+It reads a whole dataset and reports problems with its contents, not only its
+filenames:
+
+- Required and recommended sidecar fields, and the types of JSON values.
+- TSV columns and the types of their cells.
+- File associations: events, bval/bvec, channels, ASL context, coordinate
+  systems, and so on.
+- The inheritance principle, and dataset-level rules.
+- NIfTI headers, empty files, and case collisions.
+
+A few other things worth knowing:
+
+- The rules, entities, suffixes, extensions, and field definitions all come from
+  the BIDS schema at runtime, so the validator follows the standard as the schema
+  changes. You can validate against any of six bundled BIDS versions (1.8.0
+  through 1.11.1), or a local or remote schema. See
   [Schema selection](#schema-selection).
-- **Four output formats:** human-readable text, machine-readable JSON, SARIF
-  2.1.0, and a self-contained HTML report.
+- It does not raise on a bad dataset: every problem is recorded as a finding, and
+  one unreadable file cannot stop a run.
+- It is built to produce the same findings as the reference
+  [Deno validator](https://github.com/bids-standard/bids-validator). On a
+  115-dataset corpus it reaches 99.9% of that validator's error findings at the
+  latest stable schema. See [benchmarks.md](benchmarks.md).
+- Output can be plain text, JSON, SARIF 2.1.0, or a self-contained HTML report.
 
 ## Documentation map
 
 | Document | Read it for |
 |---|---|
-| [tutorial.md](tutorial.md) | A hands-on walkthrough of the CLI and the Python API, with many runnable examples (validate a dataset, a single file, choose a schema, every output format, inspect findings programmatically, CI integration). |
+| [what-changed.md](what-changed.md) | How the previous filename check worked, what this added, how, and why. Start here if you know the old `is_bids` and want to understand the new engine. |
+| [tutorial.md](tutorial.md) | A hands-on walkthrough of the command line and the Python API, with runnable examples: validate a dataset or a single file, choose a schema, every output format, inspect findings in Python, and CI integration. |
 | [cli-reference.md](cli-reference.md) | The complete command-line reference: every option, every output format, exit codes, and recipes. |
-| [architecture.md](architecture.md) | A fine-grained developer deep-dive: how the validator works internally, the key functions and why they exist, the data flow, and flowcharts of every stage. |
-| [benchmarks.md](benchmarks.md) | The extensive testing results against the Deno reference validator, at the latest stable schema and several older versions. |
+| [architecture.md](architecture.md) | How the validator works internally, stage by stage, with code references and flowcharts. |
+| [benchmarks.md](benchmarks.md) | The testing results against the Deno reference validator, at the latest stable schema and several older versions. |
 
 ## Install
 
-The full-validation engine is currently on the `feat/full-validation` branch.
-Install from source with the optional CLI dependency:
+The full-validation engine is not yet on a released version, so install from
+source with the optional CLI dependency:
 
 ```bash
-pip install "bids-validator[cli] @ git+https://github.com/karellopez/python-validator@feat/full-validation"
+pip install "bids-validator[cli] @ git+https://github.com/karellopez/python-validator@main"
 ```
 
 Or from a local checkout:
 
 ```bash
-git clone -b feat/full-validation https://github.com/karellopez/python-validator
+git clone https://github.com/karellopez/python-validator
 cd python-validator
 pip install -e ".[cli]"
 ```

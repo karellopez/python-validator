@@ -16,7 +16,7 @@ line, [Part 2](#part-2-the-python-api) if you are scripting or building a tool.
 Install the package with the CLI extra:
 
 ```bash
-pip install "bids-validator[cli] @ git+https://github.com/karellopez/python-validator@feat/full-validation"
+pip install "bids-validator[cli] @ git+https://github.com/karellopez/python-validator@main"
 ```
 
 For a sample dataset to validate, the
@@ -356,7 +356,7 @@ usage error. A minimal GitHub Actions step:
 ```yaml
 - name: Validate BIDS dataset
   run: |
-    pip install "bids-validator[cli] @ git+https://github.com/karellopez/python-validator@feat/full-validation"
+    pip install "bids-validator[cli] @ git+https://github.com/karellopez/python-validator@main"
     bids-validator "$GITHUB_WORKSPACE/dataset" --show error
 ```
 
