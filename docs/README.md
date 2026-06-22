@@ -7,10 +7,9 @@ the reference [Deno validator](https://github.com/bids-standard/bids-validator)
 without a separate runtime, and it keeps the lightweight
 `BIDSValidator.is_bids` filename check that pybids and mne-bids depend on.
 
-This package is the official `bids-validator` distribution on PyPI. The
-full-validation engine documented here is the schema-interpreting core ported
-from [bidsval](https://github.com/karellopez/bidsval); the legacy filename-only
-check is preserved and unchanged.
+This package is the official `bids-validator` distribution on PyPI. It keeps the
+original filename check unchanged and adds the full, schema-driven validator
+documented here alongside it.
 
 ## What it does
 

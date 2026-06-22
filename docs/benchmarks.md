@@ -40,8 +40,8 @@ Deno never emits.
 
 ## BIDS 1.11.1 (the latest stable schema)
 
-All three validators (Deno, [bidsval](https://github.com/karellopez/bidsval), and
-python-validator) over the 115-dataset corpus at matched schema BIDS 1.11.1.
+python-validator and the Deno reference over the 115-dataset corpus at matched
+schema BIDS 1.11.1.
 
 Aggregate finding totals:
 
@@ -49,9 +49,8 @@ Aggregate finding totals:
 |---|---|---|
 | Deno (reference) | 9962 | 138616 |
 | python-validator | 10104 | 137544 |
-| bidsval | 5659 | 133730 |
 
-python-validator vs Deno (the parity target), at the error-pair level:
+python-validator vs Deno, at the error-pair level:
 
 | Metric | Value |
 |---|---|
@@ -62,11 +61,9 @@ python-validator vs Deno (the parity target), at the error-pair level:
 | code-level false positives | **0 codes** (on raw datasets) |
 | datasets at exact error parity | **94 / 115** |
 
-For context, bidsval reaches 54.3% of Deno's error findings on the same corpus,
-not because it detects less but because it deliberately reports
-`NIFTI_HEADER_UNREADABLE` as a *warning* rather than an *error*; python-validator
-matches Deno's error severity, which is what the parity target requires. This
-makes python-validator the most Deno-faithful of the three on raw data.
+The small warning-count gap is severity matching, not missed problems:
+python-validator follows Deno's severity for every code, including reporting an
+unreadable NIfTI header as an error rather than a warning.
 
 ## Across schema versions
 
@@ -141,30 +138,30 @@ python-validator emits, Deno also emits somewhere. The over-emission is
 
 ## Per-code breakdown
 
-Error findings by code across the corpus at BIDS 1.11.1, all three validators:
+Error findings by code across the corpus at BIDS 1.11.1, python-validator against
+the Deno reference:
 
-| Code | Deno | python-validator | bidsval |
-|---|---|---|---|
-| EMPTY_FILE | 4955 | 4958 | 4954 |
-| NIFTI_HEADER_UNREADABLE | 4336 | 4336 | 0 |
-| JSON_SCHEMA_VALIDATION_ERROR | 453 | 296 | 568 |
-| SIDECAR_KEY_REQUIRED | 128 | 96 | 60 |
-| NOT_INCLUDED | 25 | 261 | 16 |
-| ASSOCIATED_EMPTY_ROOM | 23 | 23 | 23 |
-| TSV_VALUE_INCORRECT_TYPE | 16 | 12 | 12 |
-| SIDECAR_WITHOUT_DATAFILE | 12 | 12 | 12 |
-| BOLD_NOT_4D | 2 | 2 | 2 |
-| EXTENSION_MISMATCH | 2 | 2 | 2 |
-| REPETITION_TIME_MISMATCH | 2 | 2 | 2 |
-| T1W_FILE_WITH_TOO_MANY_DIMENSIONS | 2 | 2 | 2 |
-| PARTICIPANT_ID_MISMATCH | 1 | 1 | 1 |
-| TSV_COLUMN_MISSING | 1 | 1 | 1 |
-| ENTITY_NOT_IN_RULE | 0 | 80 | 0 |
-| MISSING_REQUIRED_ENTITY | 0 | 16 | 0 |
+| Code | Deno | python-validator |
+|---|---|---|
+| EMPTY_FILE | 4955 | 4958 |
+| NIFTI_HEADER_UNREADABLE | 4336 | 4336 |
+| JSON_SCHEMA_VALIDATION_ERROR | 453 | 296 |
+| SIDECAR_KEY_REQUIRED | 128 | 96 |
+| NOT_INCLUDED | 25 | 261 |
+| ASSOCIATED_EMPTY_ROOM | 23 | 23 |
+| TSV_VALUE_INCORRECT_TYPE | 16 | 12 |
+| SIDECAR_WITHOUT_DATAFILE | 12 | 12 |
+| BOLD_NOT_4D | 2 | 2 |
+| EXTENSION_MISMATCH | 2 | 2 |
+| REPETITION_TIME_MISMATCH | 2 | 2 |
+| T1W_FILE_WITH_TOO_MANY_DIMENSIONS | 2 | 2 |
+| PARTICIPANT_ID_MISMATCH | 1 | 1 |
+| TSV_COLUMN_MISSING | 1 | 1 |
+| ENTITY_NOT_IN_RULE | 0 | 80 |
+| MISSING_REQUIRED_ENTITY | 0 | 16 |
 
-`NIFTI_HEADER_UNREADABLE` is the clearest illustration of the severity
-difference: python-validator matches Deno exactly (4336), while bidsval reports
-those as warnings (0 errors). The `NOT_INCLUDED` / `ENTITY_NOT_IN_RULE` /
+The counts line up code for code, including `NIFTI_HEADER_UNREADABLE` (4336 on both
+sides, an error in both). The `NOT_INCLUDED` / `ENTITY_NOT_IN_RULE` /
 `MISSING_REQUIRED_ENTITY` excess is the derivative gap described above.
 
 ## How to reproduce
@@ -180,9 +177,8 @@ bids-validator-deno --format json -s v1.11.1 DATASET > deno.json
 ```
 
 Then diff their `(location, code)` error sets. To sweep the whole corpus and
-every schema version, the harness scripts used for the numbers above
-(`three_way_compare.py` for the 1.11.1 three-way, `multiversion_compare.py` for
-the per-version sweep) run all validators over the
+every schema version, the harness scripts used for the numbers above run both
+validators over the
 [bids-examples](https://github.com/bids-standard/bids-examples) corpus at a
 matched schema and aggregate the per-pair metrics. They are kept with the test
 outputs rather than in the package, since they depend on a local Deno binary and

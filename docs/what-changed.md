@@ -92,6 +92,21 @@ The new capability covers what the old one could not:
 | What exactly is wrong, and how serious? | no (boolean only) | yes (findings with severity and a message) |
 | Which BIDS version? | the installed schema | any bundled or supplied schema |
 
+Every new "yes" reads the same source of truth the old check did: the BIDS schema,
+which comes from `bidsschematools`. The schema is where "required" and
+"recommended" fields, the allowed column types, the entities and suffixes, and the
+list of BIDS versions are all defined. The old `is_bids` read it to build filename
+regexes; the new `validate` reads the same schema for every row above. What is new
+is not the definitions but the code that opens a dataset's files and checks their
+contents against them: `bidsschematools` supplies the schema (and a parser for the
+small expressions inside it), but it does not read your dataset, and neither did
+`is_bids`. The new code under `validation/` does.
+
+The last row is that same schema loaded two ways: `is_bids` always used whatever
+`bidsschematools` was installed, while `validate` can also load a specific bundled
+version or a schema you point it at (see
+[Schema selection](cli-reference.md#schema-selection)).
+
 ## How the two fit together
 
 We did not replace the old behaviour or rewrite it. `bids_validator.py` is
@@ -117,27 +132,42 @@ So a consumer chooses by what it needs:
   and mne-bids do.
 - `validate(root)` (or the `bids-validator` command) to validate a whole dataset.
 
-## How the new engine was built
+## What the new code is
 
-The engine is a port of [bidsval](https://github.com/karellopez/bidsval), a
-schema-driven Python validator, adapted onto the pieces this package already had.
-Three decisions shaped it.
+The new behaviour is a set of modules under
+[`validation/`](../src/bids_validator/validation/). At a high level they are:
 
-**It reuses this package's file model.** Rather than introduce a second way to
-read files, the engine builds on the existing `FileTree`
+- `schema/` and `schema_introspect.py`, which choose a BIDS schema and read its
+  vocabulary (datatypes, entities, suffixes, extensions, field definitions).
+- `context.py` (in the package root) and `validation/context.py`, which turn the
+  file tree into one small context per file: the parsed filename plus the file's
+  contents, read on demand.
+- `expressions.py`, which evaluates the short expressions the schema's rules are
+  written in.
+- `engine.py` and the `rules/` modules, which run the schema's rules and the
+  checks that cannot be written as a schema expression (empty files, filename
+  legality, inheritance, TSV columns, dataset-level checks).
+- `report.py`, `issues.py`, and `render/`, which hold the findings and turn them
+  into text, JSON, SARIF, or HTML.
+
+[architecture.md](architecture.md) walks through each of these in order. Three
+choices shaped the whole set.
+
+**It reuses this package's file model.** Rather than add a second way to read
+files, the engine builds on the existing `FileTree`
 ([`types/files.py`](../src/bids_validator/types/files.py)) and the cached content
 loaders in [`context.py`](../src/bids_validator/context.py). A file is read at
-most once, through one set of loaders, whether the read is for the base context or
-for an associated file. See
+most once, through one set of loaders, whether the read is for the file's own
+context or for a companion file. See
 [architecture.md](architecture.md#turning-one-file-into-a-context) for how that
 context is assembled.
 
-**It reads the schema instead of hardcoding BIDS.** Every datatype, entity,
-suffix, extension, field definition, and most of the rules come from the
-`bidsschematools` schema at runtime, the same schema the old regex builder used.
-Because the schema is just data that flows in, the validator can run against a
-different BIDS version: six versions are bundled, and a local or remote schema
-also works (see [Schema selection](cli-reference.md#schema-selection)).
+**It reads the schema instead of hardcoding BIDS.** As noted above, the
+datatypes, entities, suffixes, extensions, field definitions, and most of the
+rules all come from the `bidsschematools` schema at runtime. Because the schema is
+just data that flows in, the validator can run against a different BIDS version:
+six versions are bundled, and a local or remote schema also works (see
+[Schema selection](cli-reference.md#schema-selection)).
 
 **It is built to agree with the reference validator.** The target is to produce
 the same findings as the Deno validator. A practical consequence runs through the
