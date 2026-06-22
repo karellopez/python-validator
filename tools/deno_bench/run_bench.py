@@ -162,7 +162,9 @@ def run_new(
     dataset : Path
         The dataset root to validate.
     schema : str
-        The schema tag (matched comparison).
+        The schema tag the Deno side is matched against. The new validator uses
+        the ``bidsschematools`` bundled schema (BIDS 1.11.1), which is the same
+        version Deno bundles, so the comparison stays schema-matched.
     max_rows : int
         Max TSV rows to scan.
 
@@ -172,7 +174,7 @@ def run_new(
         Each issue dict has ``code``, ``severity`` and ``location`` keys.
 
     """
-    report = validate(dataset, schema=schema, read_headers=True, max_rows=max_rows)
+    report = validate(dataset, read_headers=True, max_rows=max_rows)
     issues: list[dict[str, Any]] = []
     for issue in report.dataset_issues.issues:
         issues.append(_issue_to_dict(issue, default_location=''))

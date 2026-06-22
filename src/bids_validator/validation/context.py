@@ -32,13 +32,51 @@ if TYPE_CHECKING:
 __all__ = ['EvalContext', 'eval_context', 'iter_file_contexts']
 
 
+def _nifti_header_to_native(header: Any) -> dict[str, Any]:
+    """Convert the context NiftiHeader to native Python types for the evaluator.
+
+    The package's ``load_nifti_header`` keeps numpy arrays and tuples, but the
+    schema expression language treats these fields as arrays of plain numbers.
+    Converting here keeps numpy out of the evaluator, where an un-indexable numpy
+    array would silently make ``nifti_header.dim[0]`` null and produce a false
+    positive on every NIfTI.
+
+    Parameters
+    ----------
+    header : Any
+        A ``bidsschematools.types.context.NiftiHeader``.
+
+    Returns
+    -------
+    dict
+        The header fields the schema references, as native lists / numbers.
+
+    """
+    return {
+        'dim': [int(x) for x in header.dim],
+        'pixdim': [float(x) for x in header.pixdim],
+        'shape': [int(x) for x in header.shape],
+        'voxel_sizes': [float(x) for x in header.voxel_sizes],
+        'qform_code': int(header.qform_code),
+        'sform_code': int(header.sform_code),
+        'xyzt_units': {'xyz': header.xyzt_units.xyz, 't': header.xyzt_units.t},
+        'axis_codes': list(header.axis_codes),
+        'mrs': header.mrs,
+    }
+
+
 class EvalContext(Mapping[str, Any]):
     """A schema-keyed mapping the rule engine evaluates expressions against.
 
     Every base context variable is delegated to a built
     :class:`bids_validator.context.Context` (reusing its FileTree-backed
-    loaders). ``associations`` is overlaid here and built lazily; an ``exists``
-    resolver, when supplied, is exposed under the evaluator's reserved key.
+    loaders). Three variables are adapted so the expression language only ever
+    sees native types: ``associations`` is overlaid and built lazily;
+    ``nifti_header`` is converted from numpy to native lists (an unreadable header
+    degrades to null rather than raising); ``columns`` are converted from tuples
+    to lists. An ``exists`` resolver, when supplied, is exposed under the
+    evaluator's reserved key. Resolved values are cached per key (the context is
+    immutable for the duration of a file's evaluation).
     """
 
     def __init__(
@@ -46,27 +84,50 @@ class EvalContext(Mapping[str, Any]):
         base: Context,
         *,
         exists_resolver: Callable[[str, str], bool] | None = None,
+        read_headers: bool = True,
     ) -> None:
         self._base = base
         self._exists_resolver = exists_resolver
-        self._associations: Namespace | None = None
-        self._associations_built = False
+        self._read_headers = read_headers
         self._keys: tuple[str, ...] = tuple(base.schema['meta']['context']['properties'].keys())
+        self._cache: dict[str, Any] = {}
 
     def __getitem__(self, key: str) -> Any:
-        if key == 'associations':
-            if not self._associations_built:
-                self._associations = Namespace(build_associations(self._base))
-                self._associations_built = True
-            return self._associations
         if key == EXISTS_RESOLVER_KEY:
             if self._exists_resolver is None:
                 raise KeyError(key)
             return self._exists_resolver
+        if key in self._cache:
+            return self._cache[key]
+        value: Any
+        if key == 'associations':
+            value = Namespace(build_associations(self._base))
+        elif key == 'nifti_header':
+            value = self._nifti_header()
+        elif key == 'columns':
+            value = self._columns()
+        else:
+            try:
+                value = getattr(self._base, key)
+            except AttributeError as exc:
+                raise KeyError(key) from exc
+        self._cache[key] = value
+        return value
+
+    def _nifti_header(self) -> dict[str, Any] | None:
+        if not self._read_headers:
+            return None  # header checks select on `nifti_header != null`, so they skip
         try:
-            return getattr(self._base, key)
-        except AttributeError as exc:
-            raise KeyError(key) from exc
+            header = self._base.nifti_header
+        except Exception:  # noqa: BLE001 - an unreadable header degrades to null
+            return None
+        return _nifti_header_to_native(header) if header is not None else None
+
+    def _columns(self) -> dict[str, list[Any]] | None:
+        columns = self._base.columns
+        if columns is None:
+            return None
+        return {name: list(values) for name, values in columns.items()}
 
     def __iter__(self) -> Iterator[str]:
         return iter(self._keys)
@@ -84,9 +145,10 @@ def eval_context(
     context: Context,
     *,
     exists_resolver: Callable[[str, str], bool] | None = None,
+    read_headers: bool = True,
 ) -> EvalContext:
     """Wrap a per-file :class:`~bids_validator.context.Context` for the rule engine."""
-    return EvalContext(context, exists_resolver=exists_resolver)
+    return EvalContext(context, exists_resolver=exists_resolver, read_headers=read_headers)
 
 
 def iter_file_contexts(tree: FileTree, schema: Namespace) -> Iterator[Context]:

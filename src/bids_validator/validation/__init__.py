@@ -14,9 +14,12 @@ lands.
 from __future__ import annotations
 
 from .context import EvalContext, eval_context, iter_file_contexts
+from .engine import apply_rules
 from .expressions import EvaluationError, UnknownFunction, evaluate, evaluate_string
 from .issues import DatasetIssues, Fix, Issue, RuleProvenance, Severity
+from .render import to_html, to_json, to_sarif, to_text
 from .report import FileVerdict, ValidationReport
+from .validate import validate, validate_file
 
 __all__ = [
     'DatasetIssues',
@@ -29,8 +32,15 @@ __all__ = [
     'Severity',
     'UnknownFunction',
     'ValidationReport',
+    'apply_rules',
     'eval_context',
     'evaluate',
     'evaluate_string',
     'iter_file_contexts',
+    'to_html',
+    'to_json',
+    'to_sarif',
+    'to_text',
+    'validate',
+    'validate_file',
 ]

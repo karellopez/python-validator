@@ -67,7 +67,10 @@ def datatype_to_modality(datatype: str, schema: Namespace) -> str:
 def load_tsv(file: FileTree, *, max_rows: int = 0) -> Namespace:
     """Load TSV contents into a Namespace."""
     fobj: t.Iterable[str]
-    with file.path_obj.open() as fobj:
+    # utf-8-sig strips a leading byte-order mark (real datasets, e.g. exported
+    # from spreadsheets, carry one) so the first column header is not read as
+    # "﻿participant_id"; BIDS TSVs are UTF-8.
+    with file.path_obj.open(encoding='utf-8-sig') as fobj:
         if max_rows > 0:
             fobj = itertools.islice(fobj, max_rows)
         contents = (line.rstrip('\r\n').split('\t') for line in fobj)
