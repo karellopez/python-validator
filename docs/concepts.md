@@ -18,6 +18,7 @@ The order matters, so read top to bottom the first time:
 - [Where each part of a finding comes from](#where-each-part-of-a-finding-comes-from)
 - [Two kinds of checks](#two-kinds-of-checks)
 - [The whole workflow in one picture](#the-whole-workflow-in-one-picture)
+- [The scripts and how they fit together](#the-scripts-and-how-they-fit-together)
 - [What comes from where: a summary](#what-comes-from-where-a-summary)
 - [The main imports of each file](#the-main-imports-of-each-file)
 - [Glossary](#glossary)
@@ -382,103 +383,150 @@ text (code, message, level) comes from the schema. Every hand-written check, sch
 
 ## The whole workflow in one picture
 
-Here is the whole thing on one page. The **left box** lists the actual Python
-files; the **right box** is what happens at run time. Three kinds of arrow:
-
-- Inside the **left box**, a plain arrow from one file to another means the first
-  file imports (uses) the second, so you can see how the files depend on each
-  other.
-- A dotted **"implements"** arrow connects each file to the run-time step it is
-  responsible for.
-- Inside the **right box**, the plain arrows are the run-time flow (and the schema
-  feeding into it).
+Here is the entire flow on one page: from the files on disk, through building the
+context, to running the rules and producing findings. Every element is shown,
+including the schema and what it feeds into. The solid arrows are the processing
+pipeline; the dotted, labelled arrows are the schema handing a piece of
+information to a step.
 
 ```mermaid
-flowchart LR
-    subgraph FILES["the Python files - our code. an arrow from A to B means A uses B"]
-      direction TB
-      f_validate["validate.py -<br/>orchestrates the run"]
-      f_schema["schema/resolve.py and<br/>schema_introspect.py -<br/>load and read the schema"]
-      f_files["types/files.py -<br/>FileTree"]
-      f_ctx["context.py and<br/>validation/context.py -<br/>build the per-file context"]
-      f_expr["expressions.py -<br/>the evaluator"]
-      f_engine["engine.py -<br/>the rule engine"]
-      f_hand["rules/ integrity, filenames, inheritance,<br/>dataset_checks, citation -<br/>hand-written checks"]
-      f_tab["rules/ tables, values, column_types,<br/>guidance -<br/>field and column checks, how-to-fix"]
-      f_out["issues.py, report.py, render/ -<br/>findings and report"]
-
-      f_validate --> f_schema
-      f_validate --> f_ctx
-      f_validate --> f_engine
-      f_validate --> f_hand
-      f_validate --> f_out
-      f_ctx --> f_files
-      f_ctx --> f_expr
-      f_ctx --> f_schema
-      f_engine --> f_expr
-      f_engine --> f_tab
-      f_engine --> f_schema
-      f_engine --> f_out
-      f_tab --> f_out
-      f_hand --> f_out
+flowchart TD
+    subgraph SCHEMA["THE SCHEMA - data, from bidsschematools"]
+      VOCAB["objects = the vocabulary:<br/>datatypes, entities, suffixes, extensions,<br/>and metadata-field definitions:<br/>name, description, type, unit"]
+      SRULES["rules = the checks:<br/>rules.checks = selectors + checks + issue,<br/>plus rules.files, rules.sidecars, rules.tabular_data"]
+      PARSE["the expression parser"]
     end
 
-    subgraph WORK["what happens at run time"]
-      direction TB
-      w_schema["THE SCHEMA -<br/>vocabulary, rules, parser"]
-      w_data["THE DATASET -<br/>files on disk"]
-      w_data --> w_tree["read into a FileTree"]
-      w_tree --> w_ctx["build a context per file"]
-      w_schema --> w_ctx
-      w_ctx --> w_engine["rule engine runs the schema rules"]
-      w_schema --> w_engine
-      w_ctx --> w_eval["expression evaluator"]
-      w_engine <--> w_eval
-      w_engine --> w_iss_s["issue FROM THE SCHEMA"]
-      w_ctx --> w_hand["hand-written checks"]
-      w_hand --> w_iss_c["issue FROM OUR CODE"]
-      w_iss_s --> w_report["the report"]
-      w_iss_c --> w_report
+    subgraph DATA["THE DATASET - the files on disk"]
+      FILES["file names, file contents -<br/>JSON, TSV, NIfTI - and folder layout"]
     end
 
-    f_schema -. implements .-> w_schema
-    f_files -. implements .-> w_tree
-    f_ctx -. implements .-> w_ctx
-    f_expr -. implements .-> w_eval
-    f_engine -. implements .-> w_engine
-    f_tab -. implements .-> w_engine
-    f_hand -. implements .-> w_hand
-    f_out -. implements .-> w_report
+    FILES --> TREE["FileTree: read the whole directory once.<br/>Our code."]
+    TREE --> CTX["CONTEXT, one per file. Our code.<br/>Parse the name, read the contents on demand.<br/>Facts: suffix, datatype, entities,<br/>sidecar, nifti_header, columns ..."]
+    VOCAB -. "which datatypes /<br/>suffixes / extensions exist" .-> CTX
+
+    CTX --> EVAL["EXPRESSION EVALUATOR. Our code.<br/>Run one formula against the context.<br/>Returns True, False, or null."]
+    PARSE -. "parses a formula text<br/>into a runnable tree" .-> EVAL
+
+    CTX --> ENGINE["RULE ENGINE. Our code.<br/>For each schema rule,<br/>test the selectors, then the checks."]
+    SRULES --> ENGINE
+    ENGINE -- "run each selector / check" --> EVAL
+    EVAL -- "the result" --> ENGINE
+    ENGINE -- "a check failed" --> ISS_S["issue: code + message + level.<br/>FROM THE SCHEMA"]
+
+    CTX --> HAND["HAND-WRITTEN CHECKS in rules/. Our code.<br/>empty file, gzip, filename legality,<br/>inheritance, case collisions, orphan sidecars"]
+    SRULES -. "rules.files, column &<br/>field definitions to apply" .-> HAND
+    HAND -- "a check failed" --> ISS_C["issue: code + message.<br/>FROM OUR CODE"]
+
+    VOCAB -. "field description + type" .-> FIX["how-to-fix text. Our code + schema.<br/>schema description + a small fixed frame"]
+    FIX -. "attached to" .-> ISS_S
+
+    ISS_S --> REPORT["THE REPORT. Our code.<br/>text, JSON, SARIF, or HTML"]
+    ISS_C --> REPORT
 ```
 
 Reading it in words:
 
-1. **`validate.py`** sits at the top of the left box. It is the file that imports
-   the others and wires them together; follow its arrows and you see the whole set
-   it pulls in: the schema loaders, the context, the engine, the hand-written
-   checks, and the report.
-2. At run time (right box), the **dataset** is read into a `FileTree`
-   (`types/files.py`), then one **context** is built per file (`context.py` plus
-   `validation/context.py`). The context leans on the schema's **vocabulary** for
-   which datatypes, suffixes, and extensions are real.
-3. The **rule engine** (`engine.py`) walks the schema's **rules** and, for each
-   one, asks the **expression evaluator** (`expressions.py`) to run the selectors
-   and checks against that file's context. The evaluator can only run a formula
-   because the schema's **parser** turned the formula text into something runnable.
-4. When a schema rule's check fails, the engine emits the rule's **issue**, whose
-   code, message, and level come straight from the schema; the how-to-fix text
-   (`guidance.py`) is attached, built from the schema's field description and type.
-5. In parallel, the **hand-written checks** (`rules/`) look at the same context for
-   the things the schema cannot phrase. Some read schema definitions, but their
+1. The **dataset** is read into a `FileTree`, then one **context** is built per
+   file. The context is mostly the file's own facts, but it leans on the schema's
+   **vocabulary** to know which datatypes, suffixes, and extensions are real.
+2. The **rule engine** walks the schema's **rules**. For each one it asks the
+   **expression evaluator** to run the selectors and checks against that file's
+   context. The evaluator can only run a formula because the schema's **parser**
+   turned the formula text into something runnable.
+3. When a schema rule's check fails, the engine emits the rule's **issue**, whose
+   code, message, and level all come straight from the schema. The "how to fix"
+   text is attached, built from the schema's field description and type plus a
+   small fixed sentence.
+4. In parallel, the **hand-written checks** in `rules/` look at the same context
+   for the things the schema cannot phrase as a formula. Some of them still read
+   schema definitions (filename rules, column and field definitions), but their
    issue codes and messages are written in our code.
-6. Both sources of findings flow into the **report** (`report.py` plus `render/`),
-   rendered as text, JSON, SARIF, or HTML.
+5. Both sources of findings flow into the **report**, which is rendered as text,
+   JSON, SARIF, or HTML.
 
-The two boxes line up: every file on the left implements exactly the run-time step
-it points to on the right, and the import arrows inside the left box explain why
-the files are split the way they are (the foundations, like `expressions.py` and
-`schema_introspect.py`, are imported by the higher-level files but import nothing
-from the engine themselves).
+## The scripts and how they fit together
+
+The chart above shows what happens at run time. This second chart shows the files
+it happens in, and which file imports which. An arrow from A to B means A uses
+(imports) B, so the arrows run from the high-level files down to the foundations.
+
+```mermaid
+flowchart TD
+    validate["validate.py<br/>entry point: runs one validation end to end"]
+    engine["engine.py<br/>rule engine: applies the schema's rules to a file"]
+    vctx["validation/context.py<br/>EvalContext: presents a file's facts to the rules"]
+
+    subgraph RULES["rules/ - the hand-written checks"]
+      direction TB
+      integ["integrity.py<br/>empty file, gzip, NIfTI header"]
+      fname["filenames.py<br/>filename and path legality"]
+      inh["inheritance.py<br/>sidecar inheritance"]
+      tab["tables.py + column_types.py + values.py<br/>TSV columns and value types"]
+      dchk["dataset_checks.py + citation.py<br/>cross-file checks"]
+      guide["guidance.py<br/>builds the how-to-fix text"]
+    end
+
+    subgraph FOUND["foundations - used by the rest, importing nothing from the engine"]
+      direction TB
+      expr["expressions.py<br/>runs one schema formula"]
+      intro["schema_introspect.py<br/>reads the schema vocabulary"]
+      resolve["schema/resolve.py<br/>picks and loads a schema"]
+      files["types/files.py<br/>FileTree: the in-memory file tree"]
+      bctx["context.py<br/>base context + the file-content loaders"]
+      assoc["associations.py<br/>finds a file's companion files"]
+    end
+
+    subgraph OUT["results"]
+      direction TB
+      issues["issues.py<br/>the Issue data type"]
+      report["report.py + render/<br/>the report and its formats"]
+    end
+
+    validate --> resolve
+    validate --> vctx
+    validate --> engine
+    validate --> integ
+    validate --> fname
+    validate --> inh
+    validate --> dchk
+    validate --> report
+
+    engine --> expr
+    engine --> intro
+    engine --> tab
+    engine --> guide
+    engine --> issues
+
+    vctx --> bctx
+    vctx --> assoc
+    vctx --> expr
+    vctx --> intro
+    bctx --> files
+
+    tab --> guide
+    guide --> intro
+    fname --> intro
+    integ --> issues
+    report --> issues
+```
+
+A few things to read off it:
+
+- `validate.py` is the only entry point. It imports everything else and wires one
+  run together.
+- The **foundations** (`expressions.py`, `schema_introspect.py`,
+  `schema/resolve.py`, `types/files.py`) are imported by the higher-level files but
+  import nothing from the engine themselves. That one-way flow is why each can be
+  read and tested on its own.
+- The hand-written checks in `rules/` mostly stand alone; a few (`filenames.py`,
+  `tables.py`, `guidance.py`) reach down to `schema_introspect.py` for the
+  definitions they check against.
+- Everything that produces a finding ends at `issues.py`, and the final report is
+  assembled by `report.py` and `render/`.
+
+The per-file detail (what each import is actually used for) is in
+[The main imports of each file](#the-main-imports-of-each-file) below.
 
 ## What comes from where: a summary
 
