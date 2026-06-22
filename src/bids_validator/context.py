@@ -73,9 +73,15 @@ def load_tsv(file: FileTree, *, max_rows: int = 0) -> Namespace:
     with file.path_obj.open(encoding='utf-8-sig') as fobj:
         if max_rows > 0:
             fobj = itertools.islice(fobj, max_rows)
-        contents = (line.rstrip('\r\n').split('\t') for line in fobj)
-        # Extract headers then transpose rows to columns
-        return Namespace(zip(next(contents), zip(*contents, strict=False), strict=False))
+        rows = (line.rstrip('\r\n').split('\t') for line in fobj)
+        header = next(rows, None)
+        if header is None:
+            return Namespace()
+        # Extract headers then transpose rows to columns. A fully-blank line splits
+        # to [''] (one empty field); drop those so a trailing newline does not add a
+        # spurious value or truncate the transpose.
+        data = [row for row in rows if row != ['']]
+        return Namespace(zip(header, zip(*data, strict=False), strict=False))
 
 
 @cache
@@ -85,8 +91,9 @@ def load_tsv_gz(file: FileTree, headers: tuple[str], *, max_rows: int = 0) -> Na
         gzobj: t.Iterable[bytes] = gzip.GzipFile(fileobj=fobj, mode='r')
         if max_rows > 0:
             gzobj = itertools.islice(gzobj, max_rows)
-        contents = (line.decode().rstrip('\r\n').split('\t') for line in gzobj)
-        return Namespace(zip(headers, zip(*contents, strict=False), strict=False))
+        data = [line.decode().rstrip('\r\n').split('\t') for line in gzobj]
+        data = [row for row in data if row != ['']]
+        return Namespace(zip(headers, zip(*data, strict=False), strict=False))
 
 
 @cache

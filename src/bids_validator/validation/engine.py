@@ -43,8 +43,11 @@ _EVALUATED_GROUPS: tuple[str, ...] = ('checks', 'sidecars', 'dataset_metadata', 
 # on one of these cannot be determined, so it is skipped rather than evaluated
 # against empty data (which would otherwise produce false findings). nifti_header
 # is NOT listed: the schema's selectors gate header checks on
-# ``nifti_header != null``, and the context loads it on demand.
-_UNPOPULATED_FIELDS = re.compile(r'\b(gzip|ome|tiff)\b')
+# ``nifti_header != null``, and the context loads it on demand. The plural
+# ``coordsystems`` and ``atlas_description`` aggregates are not built yet (only the
+# singular ``coordsystem`` association is); the word boundary leaves the singular
+# untouched.
+_UNPOPULATED_FIELDS = re.compile(r'\b(gzip|ome|tiff|coordsystems|atlas_description)\b')
 
 _LEVEL_TO_SEVERITY: dict[str, Severity] = {
     'error': Severity.ERROR,

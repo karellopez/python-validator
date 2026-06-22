@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING
 
 from bidsschematools.schema import load_schema
 
+from ..bidsignore import filter_file_tree
 from ..types.files import FileTree
 from .context import eval_context, iter_file_contexts
 from .engine import apply_rules
@@ -54,6 +55,17 @@ def _is_ignored(path: str) -> bool:
     return bool(parts) and parts[0] in _IGNORED_TOP_DIRS
 
 
+def _read_tree(root: str | os.PathLike[str]) -> FileTree:
+    """Read the dataset tree and drop the files its ``.bidsignore`` excludes."""
+    tree = FileTree.read_from_filesystem(root)
+    try:
+        return filter_file_tree(tree)
+    except ValueError:
+        # An unsupported .bidsignore pattern (for example an inverted "!" line);
+        # fall back to validating the unfiltered tree rather than aborting.
+        return tree
+
+
 def validate(
     root: str | os.PathLike[str],
     *,
@@ -84,7 +96,7 @@ def validate(
 
     """
     schema_ns = schema if schema is not None else load_schema()
-    tree = FileTree.read_from_filesystem(root)
+    tree = _read_tree(root)
     report = ValidationReport(
         dataset_root=Path(root),
         bids_version=str(schema_ns['bids_version']),
@@ -130,7 +142,7 @@ def validate_file(
     under the dataset root yields a single ``FILE_NOT_FOUND`` finding.
     """
     schema_ns = schema if schema is not None else load_schema()
-    tree = FileTree.read_from_filesystem(root)
+    tree = _read_tree(root)
     target = relpath.lstrip('/')
     for context in iter_file_contexts(tree, schema_ns):
         if context.path.lstrip('/') == target:

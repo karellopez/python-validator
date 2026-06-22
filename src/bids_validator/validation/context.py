@@ -23,6 +23,7 @@ from bidsschematools.types.namespace import Namespace
 from ..context import Context, Dataset, Sessions
 from .associations import build_associations
 from .expressions import EXISTS_RESOLVER_KEY
+from .schema_introspect import directory_recordings
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -219,14 +220,26 @@ def iter_file_contexts(tree: FileTree, schema: Namespace) -> Iterator[Context]:
 
     """
     dataset = Dataset(tree, schema)
-    yield from _walk(tree, dataset, None)
+    recordings = tuple(directory_recordings(schema))
+    yield from _walk(tree, dataset, None, recordings)
 
 
-def _walk(tree: FileTree, dataset: Dataset, subject: Subject | None) -> Iterator[Context]:
+def _walk(
+    tree: FileTree,
+    dataset: Dataset,
+    subject: Subject | None,
+    recordings: tuple[str, ...],
+) -> Iterator[Context]:
     if subject is None and tree.name.startswith('sub-'):
         subject = Subject(Sessions(tree))
     for child in tree.children.values():
         if child.is_dir:
-            yield from _walk(child, dataset, subject)
+            if any(child.name.endswith(ext) for ext in recordings):
+                # A directory recording (.ds / .mefd / .ome.zarr ...) is a single
+                # unit: validate it as one file and do not descend into its
+                # internals (otherwise its chunks are flagged EMPTY_FILE etc.).
+                yield Context(child, dataset, subject)
+            else:
+                yield from _walk(child, dataset, subject, recordings)
         else:
             yield Context(child, dataset, subject)
