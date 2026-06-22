@@ -106,6 +106,12 @@ class EvalContext(Mapping[str, Any]):
             value = self._nifti_header()
         elif key == 'columns':
             value = self._columns()
+        elif key == 'sidecar' and self._base.extension == '.json':
+            # A JSON file is itself a sidecar; per the inheritance principle it has
+            # no sidecar of its own, so recording rules that read `sidecar` do not
+            # apply to it (this is also what avoids double-reporting on a data
+            # file's metadata once via the data file and once via its sidecar).
+            value = Namespace()
         else:
             try:
                 value = getattr(self._base, key)
@@ -147,8 +153,43 @@ def eval_context(
     exists_resolver: Callable[[str, str], bool] | None = None,
     read_headers: bool = True,
 ) -> EvalContext:
-    """Wrap a per-file :class:`~bids_validator.context.Context` for the rule engine."""
+    """Wrap a per-file :class:`~bids_validator.context.Context` for the rule engine.
+
+    When no resolver is supplied, one is built from the context so the schema's
+    ``exists`` function can resolve referenced paths against the dataset tree.
+    """
+    if exists_resolver is None:
+        exists_resolver = _make_exists_resolver(context)
     return EvalContext(context, exists_resolver=exists_resolver, read_headers=read_headers)
+
+
+def _make_exists_resolver(base: Context) -> Callable[[str, str], bool]:
+    """Build the ``(item, rule) -> bool`` resolver the schema ``exists`` function uses.
+
+    Resolves a referenced path relative to the dataset root, the subject, the
+    stimuli directory, or the file's own directory, per the ``rule`` mode, and
+    reports whether it exists in the dataset tree.
+    """
+    root = base.dataset.tree
+    parent = base.file.parent.relative_path.rstrip('/') if base.file.parent is not None else ''
+    sub = base.entities.get('sub') or ''
+
+    def resolver(item: Any, rule: str = 'dataset') -> bool:
+        if not isinstance(item, str):
+            return False
+        if rule == 'bids-uri':
+            return item.startswith('bids:')
+        if rule == 'file':
+            target = f'{parent}/{item}' if parent else item
+        elif rule == 'subject':
+            target = f'sub-{sub}/{item}' if sub else item
+        elif rule == 'stimuli':
+            target = f'stimuli/{item}'
+        else:  # dataset
+            target = item
+        return target.lstrip('/') in root
+
+    return resolver
 
 
 def iter_file_contexts(tree: FileTree, schema: Namespace) -> Iterator[Context]:

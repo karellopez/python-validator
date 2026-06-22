@@ -46,12 +46,6 @@ _EVALUATED_GROUPS: tuple[str, ...] = ('checks', 'sidecars', 'dataset_metadata', 
 # ``nifti_header != null``, and the context loads it on demand.
 _UNPOPULATED_FIELDS = re.compile(r'\b(gzip|ome|tiff)\b')
 
-# The ``exists`` function needs a file-tree resolver that is wired in a later
-# phase. Until then it reports 0, which is a determinate (and wrong) result that
-# would make existence checks (README presence, IntendedFor ...) false-positive.
-# Skip any rule that calls it so those checks wait for the resolver.
-_NEEDS_EXISTS = re.compile(r'\bexists\s*\(')
-
 _LEVEL_TO_SEVERITY: dict[str, Severity] = {
     'error': Severity.ERROR,
     'warning': Severity.WARNING,
@@ -135,9 +129,9 @@ def _eval_rule(
 
 
 def _is_evaluable(rule: Mapping[str, Any]) -> bool:
-    """Return False if the rule references something we cannot determine yet."""
+    """Return False if the rule references a context field we do not yet populate."""
     text = ' '.join([*rule.get('selectors', []), *rule.get('checks', [])])
-    return not _UNPOPULATED_FIELDS.search(text) and not _NEEDS_EXISTS.search(text)
+    return not _UNPOPULATED_FIELDS.search(text)
 
 
 def _selectors_pass(selectors: list[str], context: Mapping[str, Any]) -> bool:
@@ -297,13 +291,18 @@ def _missing_field_issue(
 
 
 def _validate_present_values(schema: Namespace, context: Mapping[str, Any]) -> list[Issue]:
-    """Validate the value of every present sidecar / json field against its schema def.
+    """Validate the value of every present JSON field against its schema definition.
 
     A field whose name maps to several definitions is valid if it matches any of
     them, so context-specific duplicate names never cause a false positive.
+
+    Values are validated only on the ``.json`` files that carry them, matching the
+    reference validator's attribution. A data file's merged-sidecar values live in
+    those same JSON files, so validating them again here would double-report.
     """
-    is_json = context.get('extension') == '.json'
-    data = context.get('json') if is_json else context.get('sidecar')
+    if context.get('extension') != '.json':
+        return []
+    data = context.get('json')
     if not isinstance(data, Mapping):
         return []
     by_name = introspect.metadata_by_name(schema)

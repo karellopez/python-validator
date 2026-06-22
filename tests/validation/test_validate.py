@@ -80,13 +80,27 @@ def test_report_renders(dataset: Path) -> None:
     assert any(i['code'] == 'T1W_FILE_WITH_TOO_MANY_DIMENSIONS' for i in data['issues'])
 
 
-def test_exists_based_rules_are_skipped(dataset: Path) -> None:
-    # The README/IntendedFor rules call the schema's exists() function, which has
-    # no file-tree resolver yet. They must be skipped, not false-positived.
+def test_exists_resolver_makes_readme_check_fire(dataset: Path) -> None:
+    # With the exists() resolver wired, the missing-README check resolves against
+    # the tree and fires (the fixture has no README), rather than being skipped.
     report = validate(dataset)
     codes = {i.code for v in report.files for i in v.issues}
+    codes |= {i.code for i in report.dataset_issues.issues}
+    assert 'README_FILE_MISSING' in codes
+
+
+def test_exists_resolver_finds_present_readme(tmp_path: Path) -> None:
+    # When a README is present, exists() resolves it and the check stays silent.
+    (tmp_path / 'sub-01' / 'anat').mkdir(parents=True)
+    (tmp_path / 'dataset_description.json').write_text(
+        json.dumps({'Name': 'has-readme', 'BIDSVersion': '1.11.1'})
+    )
+    (tmp_path / 'README').write_text('A dataset.\n')
+    _write_nifti(tmp_path / 'sub-01' / 'anat' / 'sub-01_T1w.nii.gz', n_dims=3)
+    report = validate(tmp_path)
+    codes = {i.code for v in report.files for i in v.issues}
+    codes |= {i.code for i in report.dataset_issues.issues}
     assert 'README_FILE_MISSING' not in codes
-    assert 'MULTIPLE_README_FILES' not in codes
 
 
 def test_bom_participants_no_false_positive(tmp_path: Path) -> None:
