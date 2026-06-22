@@ -17,6 +17,7 @@ The order matters, so read top to bottom the first time:
 - [One rule, traced end to end](#one-rule-traced-end-to-end)
 - [Where each part of a finding comes from](#where-each-part-of-a-finding-comes-from)
 - [Two kinds of checks](#two-kinds-of-checks)
+- [The whole workflow in one picture](#the-whole-workflow-in-one-picture)
 - [What comes from where: a summary](#what-comes-from-where-a-summary)
 - [The main imports of each file](#the-main-imports-of-each-file)
 - [Glossary](#glossary)
@@ -354,6 +355,130 @@ differently.
 Both kinds produce the same `Issue` objects and end up in the same report. The
 split is only about *where the check is described*: in the schema (most of them),
 or in our code (the few that cannot be).
+
+There is one more distinction that trips people up, so here it is spelled out. The
+hand-written checks in `rules/` are *code*, but several of them still **read the
+schema** for the facts they check against, even though their logic and their issue
+codes are written in Python. "From the schema" is really two separate questions:
+
+- *Is the check itself written in the schema?* Only the engine's rules are. Every
+  module in `rules/` is hand-written code.
+- *Does the check read schema definitions?* The engine's rules do, and so do about
+  half of the `rules/` modules:
+
+| `rules/` module | reads the schema? | what it reads |
+|---|---|---|
+| `integrity.py` | no | nothing; pure code (empty file, gzip, NIfTI header) |
+| `inheritance.py` | no | pure code |
+| `dataset_checks.py` | no | pure code (case collisions, orphan sidecars, unused stimuli) |
+| `citation.py` | no | pure code (CITATION.cff) |
+| `filenames.py` | yes | `rules.files` and the entity definitions |
+| `tables.py` | yes | the column rules and `objects.columns` |
+| `values.py` | yes | the metadata field type definitions |
+| `guidance.py` | yes | field descriptions and types, to build the how-to-fix text |
+
+The thing that is unique to the **engine's schema rules** is that even their issue
+text (code, message, level) comes from the schema. Every hand-written check, schema-reading or not, spells out its own issue code and message in code.
+
+## The whole workflow in one picture
+
+Here is the whole thing on one page. The **left box** lists the actual Python
+files; the **right box** is what happens at run time. Three kinds of arrow:
+
+- Inside the **left box**, a plain arrow from one file to another means the first
+  file imports (uses) the second, so you can see how the files depend on each
+  other.
+- A dotted **"implements"** arrow connects each file to the run-time step it is
+  responsible for.
+- Inside the **right box**, the plain arrows are the run-time flow (and the schema
+  feeding into it).
+
+```mermaid
+flowchart LR
+    subgraph FILES["the Python files - our code. an arrow from A to B means A uses B"]
+      direction TB
+      f_validate["validate.py -<br/>orchestrates the run"]
+      f_schema["schema/resolve.py and<br/>schema_introspect.py -<br/>load and read the schema"]
+      f_files["types/files.py -<br/>FileTree"]
+      f_ctx["context.py and<br/>validation/context.py -<br/>build the per-file context"]
+      f_expr["expressions.py -<br/>the evaluator"]
+      f_engine["engine.py -<br/>the rule engine"]
+      f_hand["rules/ integrity, filenames, inheritance,<br/>dataset_checks, citation -<br/>hand-written checks"]
+      f_tab["rules/ tables, values, column_types,<br/>guidance -<br/>field and column checks, how-to-fix"]
+      f_out["issues.py, report.py, render/ -<br/>findings and report"]
+
+      f_validate --> f_schema
+      f_validate --> f_ctx
+      f_validate --> f_engine
+      f_validate --> f_hand
+      f_validate --> f_out
+      f_ctx --> f_files
+      f_ctx --> f_expr
+      f_ctx --> f_schema
+      f_engine --> f_expr
+      f_engine --> f_tab
+      f_engine --> f_schema
+      f_engine --> f_out
+      f_tab --> f_out
+      f_hand --> f_out
+    end
+
+    subgraph WORK["what happens at run time"]
+      direction TB
+      w_schema["THE SCHEMA -<br/>vocabulary, rules, parser"]
+      w_data["THE DATASET -<br/>files on disk"]
+      w_data --> w_tree["read into a FileTree"]
+      w_tree --> w_ctx["build a context per file"]
+      w_schema --> w_ctx
+      w_ctx --> w_engine["rule engine runs the schema rules"]
+      w_schema --> w_engine
+      w_ctx --> w_eval["expression evaluator"]
+      w_engine <--> w_eval
+      w_engine --> w_iss_s["issue FROM THE SCHEMA"]
+      w_ctx --> w_hand["hand-written checks"]
+      w_hand --> w_iss_c["issue FROM OUR CODE"]
+      w_iss_s --> w_report["the report"]
+      w_iss_c --> w_report
+    end
+
+    f_schema -. implements .-> w_schema
+    f_files -. implements .-> w_tree
+    f_ctx -. implements .-> w_ctx
+    f_expr -. implements .-> w_eval
+    f_engine -. implements .-> w_engine
+    f_tab -. implements .-> w_engine
+    f_hand -. implements .-> w_hand
+    f_out -. implements .-> w_report
+```
+
+Reading it in words:
+
+1. **`validate.py`** sits at the top of the left box. It is the file that imports
+   the others and wires them together; follow its arrows and you see the whole set
+   it pulls in: the schema loaders, the context, the engine, the hand-written
+   checks, and the report.
+2. At run time (right box), the **dataset** is read into a `FileTree`
+   (`types/files.py`), then one **context** is built per file (`context.py` plus
+   `validation/context.py`). The context leans on the schema's **vocabulary** for
+   which datatypes, suffixes, and extensions are real.
+3. The **rule engine** (`engine.py`) walks the schema's **rules** and, for each
+   one, asks the **expression evaluator** (`expressions.py`) to run the selectors
+   and checks against that file's context. The evaluator can only run a formula
+   because the schema's **parser** turned the formula text into something runnable.
+4. When a schema rule's check fails, the engine emits the rule's **issue**, whose
+   code, message, and level come straight from the schema; the how-to-fix text
+   (`guidance.py`) is attached, built from the schema's field description and type.
+5. In parallel, the **hand-written checks** (`rules/`) look at the same context for
+   the things the schema cannot phrase. Some read schema definitions, but their
+   issue codes and messages are written in our code.
+6. Both sources of findings flow into the **report** (`report.py` plus `render/`),
+   rendered as text, JSON, SARIF, or HTML.
+
+The two boxes line up: every file on the left implements exactly the run-time step
+it points to on the right, and the import arrows inside the left box explain why
+the files are split the way they are (the foundations, like `expressions.py` and
+`schema_introspect.py`, are imported by the higher-level files but import nothing
+from the engine themselves).
 
 ## What comes from where: a summary
 
