@@ -171,13 +171,22 @@ def main(
             is_eager=True,
         ),
     ] = False,
-    output_type: Annotated[
+    out_type: Annotated[
         str,
-        typer.Option('--output-type', help='Output format: text, json, sarif or html.'),
+        typer.Option(
+            '--out-type',
+            help="Output format: text, json, sarif, html, or 'all' (write every format). "
+            'A single format prints to stdout unless --out-dir is given; '
+            "'all' writes files (into --out-dir, or the current directory).",
+        ),
     ] = 'text',
     out_dir: Annotated[
         str | None,
-        typer.Option('--out-dir', help='Write the report into this directory instead of stdout.'),
+        typer.Option(
+            '--out-dir',
+            help='Directory to write the report file(s) into. Without it, a single format '
+            "prints to stdout and 'all' writes into the current directory.",
+        ),
     ] = None,
     show: Annotated[
         str,
@@ -209,22 +218,30 @@ def main(
         ok = validate_filenames(root, resolve(schema))
         raise typer.Exit(code=0 if ok else 1)
 
-    renderer = RENDERERS.get(output_type)
-    if renderer is None:
-        print(f'Unknown output type {output_type!r}; use one of: {", ".join(RENDERERS)}.')
+    if out_type == 'all':
+        formats = list(RENDERERS)
+    elif out_type in RENDERERS:
+        formats = [out_type]
+    else:
+        print(f'Unknown output type {out_type!r}; use one of: {", ".join(RENDERERS)}, all.')
         raise typer.Exit(code=2)
 
     report = validate(bids_path, schema=schema, read_headers=not no_headers, max_rows=max_rows)
-    rendered = renderer(report.filtered(_severity_filter(show)))
+    filtered = report.filtered(_severity_filter(show))
 
-    if out_dir:
-        directory = Path(out_dir)
+    # A single format streams to stdout by default, so it composes with pipes and
+    # redirection; writing a file is opt-in via --out-dir. 'all' cannot stream four
+    # documents to stdout, so it always writes files, defaulting to the current
+    # directory when --out-dir is omitted.
+    if out_dir or out_type == 'all':
+        directory = Path(out_dir) if out_dir else Path.cwd()
         directory.mkdir(parents=True, exist_ok=True)
-        target = directory / f'bids-validator-report.{EXTENSIONS.get(output_type, "txt")}'
-        target.write_text(rendered, encoding='utf-8')
-        print(f'Wrote {target}')
+        for fmt in formats:
+            target = directory / f'bids-validator-report.{EXTENSIONS[fmt]}'
+            target.write_text(RENDERERS[fmt](filtered), encoding='utf-8')
+            print(f'Wrote {target}')
     else:
-        print(rendered)
+        print(RENDERERS[formats[0]](filtered))
 
     raise typer.Exit(code=0 if report.is_valid else 1)
 

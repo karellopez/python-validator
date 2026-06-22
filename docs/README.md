@@ -80,7 +80,7 @@ Command line:
 bids-validator /path/to/bids/dataset
 
 # only errors, machine-readable
-bids-validator /path/to/bids/dataset --show error --output-type json
+bids-validator /path/to/bids/dataset --show error --out-type json
 
 # validate against a specific BIDS version
 bids-validator /path/to/bids/dataset --schema 1.10.0

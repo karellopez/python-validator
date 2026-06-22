@@ -173,7 +173,7 @@ For a single dataset, compare the two validators directly:
 
 ```bash
 # python-validator
-bids-validator DATASET --schema 1.11.1 --output-type json --show error > pv.json
+bids-validator DATASET --schema 1.11.1 --out-type json --show error > pv.json
 
 # Deno reference at the matched schema
 bids-validator-deno --format json -s v1.11.1 DATASET > deno.json

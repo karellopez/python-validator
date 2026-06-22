@@ -40,7 +40,7 @@ def test_cli_valid_dataset_exit_zero(tmp_path: Path) -> None:
 
 def test_cli_invalid_dataset_exit_one_json(tmp_path: Path) -> None:
     # A 4D T1w is an error; JSON output and a non-zero exit code.
-    result = runner.invoke(app, [str(_dataset(tmp_path, n_dims=4)), '--output-type', 'json'])
+    result = runner.invoke(app, [str(_dataset(tmp_path, n_dims=4)), '--out-type', 'json'])
     assert result.exit_code == 1
     data = json.loads(result.stdout)
     assert data['valid'] is False
@@ -50,13 +50,33 @@ def test_cli_invalid_dataset_exit_one_json(tmp_path: Path) -> None:
 def test_cli_out_dir(tmp_path: Path) -> None:
     dataset = _dataset(tmp_path, n_dims=3)
     out = tmp_path / 'report'
-    result = runner.invoke(app, [str(dataset), '--output-type', 'html', '--out-dir', str(out)])
+    result = runner.invoke(app, [str(dataset), '--out-type', 'html', '--out-dir', str(out)])
     assert result.exit_code == 0
     written = out / 'bids-validator-report.html'
     assert written.is_file()
     assert written.read_text().startswith('<!doctype html>')
 
 
-def test_cli_unknown_output_type(tmp_path: Path) -> None:
-    result = runner.invoke(app, [str(_dataset(tmp_path, n_dims=3)), '--output-type', 'bogus'])
+def test_cli_out_type_all_writes_every_format(tmp_path: Path) -> None:
+    dataset = _dataset(tmp_path, n_dims=3)
+    out = tmp_path / 'all-reports'
+    result = runner.invoke(app, [str(dataset), '--out-type', 'all', '--out-dir', str(out)])
+    assert result.exit_code == 0
+    for ext in ('txt', 'json', 'sarif', 'html'):
+        assert (out / f'bids-validator-report.{ext}').is_file()
+
+
+def test_cli_out_type_all_defaults_to_cwd(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    # With no --out-dir, 'all' writes into the current working directory.
+    dataset = _dataset(tmp_path, n_dims=3)
+    workdir = tmp_path / 'work'
+    workdir.mkdir()
+    monkeypatch.chdir(workdir)
+    result = runner.invoke(app, [str(dataset), '--out-type', 'all'])
+    assert result.exit_code == 0
+    assert (workdir / 'bids-validator-report.json').is_file()
+
+
+def test_cli_unknown_out_type(tmp_path: Path) -> None:
+    result = runner.invoke(app, [str(_dataset(tmp_path, n_dims=3)), '--out-type', 'bogus'])
     assert result.exit_code == 2

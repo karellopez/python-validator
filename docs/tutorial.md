@@ -90,19 +90,20 @@ bids-validator bids-examples/ds102 --show all         # everything (default)
 
 ### Choosing an output format
 
-Four formats are available with `--output-type`:
+Four formats are available with `--out-type`, plus `all`:
 
 ```bash
-bids-validator bids-examples/ds102 --output-type text    # human-readable (default)
-bids-validator bids-examples/ds102 --output-type json    # machine-readable
-bids-validator bids-examples/ds102 --output-type sarif    # SARIF 2.1.0 for code scanning
-bids-validator bids-examples/ds102 --output-type html    # a self-contained HTML report
+bids-validator bids-examples/ds102 --out-type text    # human-readable (default)
+bids-validator bids-examples/ds102 --out-type json    # machine-readable
+bids-validator bids-examples/ds102 --out-type sarif    # SARIF 2.1.0 for code scanning
+bids-validator bids-examples/ds102 --out-type html    # a self-contained HTML report
+bids-validator bids-examples/ds102 --out-type all     # write all four (see below)
 ```
 
 The JSON shape is flat and stable: run metadata, counts, then one `issues` list.
 
 ```bash
-bids-validator bids-examples/ds102 --output-type json --show error | head -20
+bids-validator bids-examples/ds102 --out-type json --show error | head -20
 ```
 
 ```json
@@ -119,11 +120,25 @@ bids-validator bids-examples/ds102 --output-type json --show error | head -20
 }
 ```
 
-Write a report to a file instead of stdout with `--out-dir`:
+A single format prints to stdout, which lets you redirect or pipe it. Pass
+`--out-dir` to write a file instead:
 
 ```bash
-bids-validator bids-examples/ds102 --output-type html --out-dir ./reports
+bids-validator bids-examples/ds102 --out-type json > report.json    # redirect
+bids-validator bids-examples/ds102 --out-type html --out-dir ./reports
 # writes ./reports/bids-validator-report.html
+```
+
+`--out-type all` writes every format at once. Because four documents cannot go to
+stdout, it always writes files, into `--out-dir` if you give one, otherwise the
+current directory:
+
+```bash
+bids-validator bids-examples/ds102 --out-type all --out-dir ./reports
+# Wrote ./reports/bids-validator-report.txt
+# Wrote ./reports/bids-validator-report.json
+# Wrote ./reports/bids-validator-report.sarif
+# Wrote ./reports/bids-validator-report.html
 ```
 
 ### Summarising with jq
@@ -132,11 +147,11 @@ Because the JSON is flat, common questions are one `jq` line:
 
 ```bash
 # how many of each error code?
-bids-validator bids-examples/ds102 --output-type json --show error \
+bids-validator bids-examples/ds102 --out-type json --show error \
   | jq -r '.issues[].code' | sort | uniq -c | sort -rn
 
 # list the files with errors
-bids-validator bids-examples/ds102 --output-type json --show error \
+bids-validator bids-examples/ds102 --out-type json --show error \
   | jq -r '.issues[].location' | sort -u
 ```
 
@@ -364,7 +379,7 @@ Upload the SARIF report so findings appear in the GitHub Security tab:
 
 ```yaml
 - name: Validate and emit SARIF
-  run: bids-validator dataset --output-type sarif --out-dir sarif-out
+  run: bids-validator dataset --out-type sarif --out-dir sarif-out
 - uses: github/codeql-action/upload-sarif@v3
   with:
     sarif_file: sarif-out/bids-validator-report.sarif

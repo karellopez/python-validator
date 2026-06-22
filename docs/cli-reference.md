@@ -26,8 +26,8 @@ command (useful when another `bids-validator` is on the PATH).
 |---|---|---|
 | `--schema SELECTOR` | installed `bidsschematools` (latest stable) | Which schema to validate against. See [Schema selection](#schema-selection). |
 | `--list-schemas` | | Print the default and bundled schema versions, then exit. |
-| `--output-type {text,json,sarif,html}` | `text` | The report format. See [Output formats](#output-formats). |
-| `--out-dir DIR` | | Write the report into `DIR/bids-validator-report.<ext>` instead of printing to stdout. The extension follows the format (`txt`, `json`, `sarif`, `html`). |
+| `--out-type {text,json,sarif,html,all}` | `text` | The report format, or `all` to write every format at once. See [Output formats](#output-formats) and [Where output goes](#where-output-goes). |
+| `--out-dir DIR` | | Directory to write the report file(s) into, as `DIR/bids-validator-report.<ext>` (`txt`, `json`, `sarif`, `html`). See [Where output goes](#where-output-goes). |
 | `--show {error,warning,all}` | `all` | Which severities to include in the *output*. Does not change the exit code (validity always depends on errors). |
 | `--no-headers` | off | Skip reading NIfTI headers. Faster, but header checks (for example `NIFTI_HEADER_UNREADABLE`, dimension checks) are then skipped. |
 | `--max-rows N` | `1000` | Intended cap on TSV rows scanned per table during value-type checks. Accepted for a stable interface; row scanning is not yet bounded (value typing currently reads every row), so this is a no-op today. |
@@ -46,7 +46,7 @@ The exit code is meant for scripts and CI:
 |---|---|
 | `0` | Valid: no error-level findings (warnings do not affect this). |
 | `1` | Invalid: at least one error-level finding. |
-| `2` | Usage error: an unknown `--output-type`. |
+| `2` | Usage error: an unknown `--out-type`. |
 
 `--show` only filters what is displayed; the exit code is computed from the
 unfiltered result, so `--show warning` still exits `1` when there are errors.
@@ -77,10 +77,43 @@ bundled versions: 1.8.0, 1.9.0, 1.10.0, 1.10.1, 1.11.0, 1.11.1
 select one with '--schema X.Y.Z'; a local schema.json, a source directory, 'latest', or a URL also work.
 ```
 
+## Where output goes
+
+By default a single format is printed to **stdout**, so it composes with the
+shell: pipe it to another tool, or redirect it to a file with `>`. The validator
+does not write a file unless you ask it to.
+
+```bash
+bids-validator DATASET --out-type json            # prints to stdout
+bids-validator DATASET --out-type json > out.json # you choose the file
+bids-validator DATASET --out-type json | jq .     # or pipe it onward
+```
+
+`--out-dir` opts into writing a file instead, named
+`bids-validator-report.<ext>` for the chosen format:
+
+```bash
+bids-validator DATASET --out-type html --out-dir ./reports
+# writes ./reports/bids-validator-report.html
+```
+
+`--out-type all` writes every format at once, so it cannot stream to stdout. It
+always writes files: into `--out-dir` if given, otherwise into the current
+directory. Each path it writes is printed.
+
+```bash
+bids-validator DATASET --out-type all --out-dir ./reports
+# Wrote ./reports/bids-validator-report.txt
+# Wrote ./reports/bids-validator-report.json
+# Wrote ./reports/bids-validator-report.sarif
+# Wrote ./reports/bids-validator-report.html
+```
+
 ## Output formats
 
-`--output-type` selects one of four renderers. All are pure functions of the
-result, so the same run can be printed or written to any number of files.
+`--out-type` selects one of four renderers (or `all` to write them all). Each is
+a pure function of the result, so the same run can be printed or written to any
+number of files.
 
 ### text (default)
 
@@ -144,9 +177,15 @@ summary and a table of findings. Good for sharing a report or attaching it as a
 CI artifact.
 
 ```bash
-bids-validator DATASET --output-type html --out-dir ./reports
+bids-validator DATASET --out-type html --out-dir ./reports
 # writes ./reports/bids-validator-report.html
 ```
+
+### all
+
+Writes all four formats in one run (see [Where output goes](#where-output-goes)).
+Useful in CI when you want a machine-readable report and a human-readable one from
+a single validation.
 
 ## Recipes
 
@@ -159,9 +198,7 @@ bids-validator "$DATASET" --show error || exit 1
 Write all four reports as CI artifacts:
 
 ```bash
-for fmt in text json sarif html; do
-  bids-validator "$DATASET" --output-type "$fmt" --out-dir ./reports
-done
+bids-validator "$DATASET" --out-type all --out-dir ./reports
 ```
 
 Fast structural pass (skip header reads) during iteration:
@@ -185,6 +222,6 @@ bids-validator "$DATASET" --filenames-only
 Pipe JSON to `jq` to count findings by code:
 
 ```bash
-bids-validator "$DATASET" --output-type json --show error \
+bids-validator "$DATASET" --out-type json --show error \
   | jq -r '.issues[].code' | sort | uniq -c | sort -rn
 ```
