@@ -112,6 +112,12 @@ class EvalContext(Mapping[str, Any]):
             # apply to it (this is also what avoids double-reporting on a data
             # file's metadata once via the data file and once via its sidecar).
             value = Namespace()
+        elif key == 'entities':
+            # FileParts records a no-hyphen filename token (for example the
+            # "dataset" in dataset_description.json) as an entity with a None
+            # value. Those are not BIDS entities; drop them so rules see only real
+            # key-label entities (an empty label "" is kept; it is its own finding).
+            value = {k: v for k, v in self._base.entities.items() if v is not None}
         else:
             try:
                 value = getattr(self._base, key)

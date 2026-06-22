@@ -9,6 +9,7 @@ checks. Each is a pure function of a file's context that returns a list of issue
 
 from __future__ import annotations
 
+from .filenames import filename_checks
 from .integrity import integrity_checks
 
-__all__ = ['integrity_checks']
+__all__ = ['filename_checks', 'integrity_checks']

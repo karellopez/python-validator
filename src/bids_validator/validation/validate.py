@@ -25,7 +25,7 @@ from .context import eval_context, iter_file_contexts
 from .engine import apply_rules
 from .issues import Issue, Severity
 from .report import FileVerdict, ValidationReport
-from .rules import integrity_checks
+from .rules import filename_checks, integrity_checks
 
 if TYPE_CHECKING:
     import os
@@ -142,6 +142,7 @@ def _validate_one(
         verdict.issues.extend(
             integrity_checks(context.file, evaluation, read_headers=read_headers)
         )
+        verdict.issues.extend(filename_checks(schema_ns, evaluation, context.file))
         verdict.issues.extend(apply_rules(schema_ns, evaluation))
     except Exception as error:  # noqa: BLE001 - never let one file abort the whole run
         verdict.issues.append(
