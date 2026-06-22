@@ -92,6 +92,46 @@ def inheritance_checks(schema: Namespace, file: FileTree) -> list[Issue]:
     return issues
 
 
+def applicable_sidecar_files(schema: Namespace, file: FileTree) -> list[str]:
+    """Return the relpaths of the JSON sidecars that apply to ``file`` (one per level).
+
+    Used to mark sidecars as "in use", so a sidecar that applies to no data file
+    can be reported. Empty for a JSON file or a file with no suffix.
+    """
+    if file.name.endswith('.json'):
+        return []
+    source_entities, source_suffix = _parts(schema, file)
+    if not source_suffix:
+        return []
+    out: list[str] = []
+    for dir_tree in _ancestor_dirs(file):
+        chosen = _best_sidecar(schema, dir_tree, source_entities, source_suffix)
+        if chosen is not None:
+            out.append(chosen.relative_path)
+    return out
+
+
+def _best_sidecar(
+    schema: Namespace,
+    dir_tree: FileTree,
+    source_entities: dict[str, str],
+    source_suffix: str,
+) -> FileTree | None:
+    """Return the single most-specific sidecar in one directory that applies, or None."""
+    candidates: list[tuple[dict[str, str], FileTree]] = []
+    for candidate in _json_sidecars_in(dir_tree):
+        cand_entities, cand_suffix = _parts(schema, candidate)
+        if cand_suffix != source_suffix or not _is_subset(cand_entities, source_entities):
+            continue
+        if cand_entities == source_entities:  # exact match: use it directly
+            return candidate
+        candidates.append((cand_entities, candidate))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: (len(item[0]), item[1].relative_path))
+    return candidates[-1][1]
+
+
 def _parts(schema: Namespace, file: FileTree) -> tuple[dict[str, str], str]:
     """Return (real entities, suffix) for a file (dropping no-hyphen phantom tokens)."""
     parts = FileParts.from_file(file, schema)

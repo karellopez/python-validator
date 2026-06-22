@@ -26,9 +26,12 @@ from .engine import apply_rules
 from .issues import Issue, Severity
 from .report import FileVerdict, ValidationReport
 from .rules import filename_checks, inheritance_checks, integrity_checks
+from .rules.dataset_checks import collect_viewed, dataset_checks
 
 if TYPE_CHECKING:
     import os
+    from collections.abc import Mapping
+    from typing import Any
 
     from bidsschematools.types.namespace import Namespace
 
@@ -40,7 +43,7 @@ __all__ = ['validate', 'validate_file']
 # default (their contents are associated data, not BIDS files), plus hidden paths
 # (a component starting with "."). Full .bidsignore handling lands with the
 # dataset-level checks.
-_IGNORED_TOP_DIRS = frozenset({'sourcedata', 'derivatives', 'code'})
+_IGNORED_TOP_DIRS = frozenset({'sourcedata', 'derivatives', 'code', 'stimuli'})
 
 
 def _is_ignored(path: str) -> bool:
@@ -87,10 +90,27 @@ def validate(
         bids_version=str(schema_ns['bids_version']),
         schema_version=str(schema_ns['schema_version']),
     )
+    viewed_json: set[str] = set()
+    viewed_stimuli: set[str] = set()
+    validated: list[FileTree] = []
     for context in iter_file_contexts(tree, schema_ns):
         if _is_ignored(context.path):
             continue
-        report.files.append(_validate_one(schema_ns, context, read_headers=read_headers))
+        evaluation = eval_context(context, read_headers=read_headers)
+        report.files.append(
+            _validate_one(schema_ns, context, evaluation, read_headers=read_headers)
+        )
+        validated.append(context.file)
+        _collect_viewed(schema_ns, context.file, evaluation, viewed_json, viewed_stimuli)
+    report.dataset_issues.extend(dataset_checks(tree, validated, viewed_json, viewed_stimuli))
+    if not _has_subjects(tree):
+        report.dataset_issues.add(
+            Issue(
+                code='NO_SUBJECTS',
+                severity=Severity.WARNING,
+                message='no sub-* directories found under the dataset root',
+            )
+        )
     report.recompute()
     return report
 
@@ -114,7 +134,8 @@ def validate_file(
     target = relpath.lstrip('/')
     for context in iter_file_contexts(tree, schema_ns):
         if context.path.lstrip('/') == target:
-            return _validate_one(schema_ns, context, read_headers=read_headers)
+            evaluation = eval_context(context, read_headers=read_headers)
+            return _validate_one(schema_ns, context, evaluation, read_headers=read_headers)
     verdict = FileVerdict(path=Path(relpath))
     verdict.issues.append(
         Issue(
@@ -131,14 +152,14 @@ def validate_file(
 def _validate_one(
     schema_ns: Namespace,
     context: Context,
+    evaluation: Mapping[str, Any],
     *,
     read_headers: bool,
 ) -> FileVerdict:
-    """Run the engine for one file, capturing any read failure as a warning."""
+    """Run the per-file checks for one file, capturing any read failure as a warning."""
     location = context.path.lstrip('/')
     verdict = FileVerdict(path=Path(location))
     try:
-        evaluation = eval_context(context, read_headers=read_headers)
         verdict.issues.extend(
             integrity_checks(context.file, evaluation, read_headers=read_headers)
         )
@@ -156,3 +177,22 @@ def _validate_one(
         )
     verdict.recompute_severity()
     return verdict
+
+
+def _collect_viewed(
+    schema_ns: Namespace,
+    file: FileTree,
+    evaluation: Mapping[str, Any],
+    viewed_json: set[str],
+    viewed_stimuli: set[str],
+) -> None:
+    """Record the sidecars/stimuli one file uses; never abort validation on error."""
+    try:
+        collect_viewed(schema_ns, file, evaluation, viewed_json, viewed_stimuli)
+    except Exception:  # noqa: BLE001 - viewed-collection is best-effort
+        return
+
+
+def _has_subjects(tree: FileTree) -> bool:
+    """Return True if the dataset has at least one ``sub-*`` directory."""
+    return any(child.is_dir and child.name.startswith('sub-') for child in tree.children.values())
