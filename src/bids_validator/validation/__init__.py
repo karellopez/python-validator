@@ -19,6 +19,14 @@ from .expressions import EvaluationError, UnknownFunction, evaluate, evaluate_st
 from .issues import DatasetIssues, Fix, Issue, RuleProvenance, Severity
 from .render import to_html, to_json, to_sarif, to_text
 from .report import FileVerdict, ValidationReport
+from .schema import (
+    SchemaNotAvailable,
+    SchemaSelector,
+    available_versions,
+    bids_version,
+    resolve,
+    schema_version,
+)
 from .validate import validate, validate_file
 
 __all__ = [
@@ -29,14 +37,20 @@ __all__ = [
     'Fix',
     'Issue',
     'RuleProvenance',
+    'SchemaNotAvailable',
+    'SchemaSelector',
     'Severity',
     'UnknownFunction',
     'ValidationReport',
     'apply_rules',
+    'available_versions',
+    'bids_version',
     'eval_context',
     'evaluate',
     'evaluate_string',
     'iter_file_contexts',
+    'resolve',
+    'schema_version',
     'to_html',
     'to_json',
     'to_sarif',

@@ -12,14 +12,20 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Annotated
 
-from bidsschematools.schema import load_schema
 from bidsschematools.types.context import Subject
 from bidsschematools.types.namespace import Namespace
 
 from bids_validator import BIDSValidator
 from bids_validator.context import Context, Dataset, Sessions
 from bids_validator.types.files import FileTree
-from bids_validator.validation import Severity, validate
+from bids_validator.validation import (
+    Severity,
+    available_versions,
+    bids_version,
+    resolve,
+    schema_version,
+    validate,
+)
 from bids_validator.validation.render import EXTENSIONS, RENDERERS
 
 app = typer.Typer()
@@ -107,6 +113,34 @@ def version_callback(value: bool) -> None:
         raise typer.Exit()
 
 
+def list_schemas_callback(value: bool) -> None:
+    """Print the default and bundled schema versions, then exit.
+
+    Parameters
+    ----------
+    value : bool
+        value received from --list-schemas flag
+
+    Raises
+    ------
+    typer.Exit
+        Exit without any errors
+
+    """
+    if value:
+        default = resolve(None)
+        print(
+            f'default (installed bidsschematools): '
+            f'BIDS {bids_version(default)} (schema {schema_version(default)})'
+        )
+        print(f'bundled versions: {", ".join(available_versions()) or "none"}')
+        print(
+            "select one with '--schema X.Y.Z'; a local schema.json, a source "
+            "directory, 'latest', or a URL also work."
+        )
+        raise typer.Exit()
+
+
 def _severity_filter(show: str) -> set[Severity]:
     if show == 'error':
         return {Severity.ERROR}
@@ -118,7 +152,25 @@ def _severity_filter(show: str) -> set[Severity]:
 @app.command()
 def main(
     bids_path: str,
-    schema_path: str | None = None,
+    schema: Annotated[
+        str | None,
+        typer.Option(
+            '--schema',
+            help='Schema to validate against: a bundled BIDS version (e.g. 1.11.1, 1.10.0), '
+            "'latest', a URL, a local schema.json, or a YAML schema source directory. "
+            'Default: the installed bidsschematools schema (latest stable). '
+            'Run --list-schemas to see bundled versions.',
+        ),
+    ] = None,
+    list_schemas: Annotated[
+        bool,
+        typer.Option(
+            '--list-schemas',
+            help='List the default and bundled schema versions, then exit.',
+            callback=list_schemas_callback,
+            is_eager=True,
+        ),
+    ] = False,
     output_type: Annotated[
         str,
         typer.Option('--output-type', help='Output format: text, json, sarif or html.'),
@@ -152,11 +204,9 @@ def main(
     if verbose:
         show_version()
 
-    schema = load_schema(schema_path) if schema_path else None
-
     if filenames_only:
         root = FileTree.read_from_filesystem(bids_path)
-        ok = validate_filenames(root, schema if schema is not None else load_schema())
+        ok = validate_filenames(root, resolve(schema))
         raise typer.Exit(code=0 if ok else 1)
 
     renderer = RENDERERS.get(output_type)

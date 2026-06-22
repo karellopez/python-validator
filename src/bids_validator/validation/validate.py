@@ -18,7 +18,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from bidsschematools.schema import load_schema
+from bidsschematools.types.namespace import Namespace
 
 from ..bidsignore import filter_file_tree
 from ..types.files import FileTree
@@ -28,13 +28,12 @@ from .issues import Issue, Severity
 from .report import FileVerdict, ValidationReport
 from .rules import filename_checks, inheritance_checks, integrity_checks
 from .rules.dataset_checks import collect_viewed, dataset_checks
+from .schema import SchemaSelector, resolve
 
 if TYPE_CHECKING:
     import os
     from collections.abc import Mapping
     from typing import Any
-
-    from bidsschematools.types.namespace import Namespace
 
     from ..context import Context
 
@@ -69,7 +68,7 @@ def _read_tree(root: str | os.PathLike[str]) -> FileTree:
 def validate(
     root: str | os.PathLike[str],
     *,
-    schema: Namespace | None = None,
+    schema: Namespace | SchemaSelector = None,
     read_headers: bool = True,
     max_rows: int = 1000,
 ) -> ValidationReport:
@@ -79,9 +78,13 @@ def validate(
     ----------
     root : str or os.PathLike
         The dataset root.
-    schema : Namespace, optional
-        A pre-loaded schema. Defaults to the ``bidsschematools`` bundled schema
-        (BIDS 1.11.1), which matches the reference validator's bundled schema.
+    schema : Namespace or str or os.PathLike or None, optional
+        Which schema to validate against. A pre-loaded ``Namespace`` is used
+        as-is; a *selector* (a bundled version such as ``"1.10.0"``, ``"latest"``,
+        a URL, or a local ``schema.json`` / source directory) is resolved by
+        :func:`bids_validator.validation.schema.resolve`. ``None`` (the default)
+        uses the installed ``bidsschematools`` schema, the latest stable BIDS
+        version, matching the reference validator's bundled schema.
     read_headers : bool, default True
         Read NIfTI headers for header checks (needs nibabel). When False, header
         checks select on a null ``nifti_header`` and are skipped.
@@ -95,7 +98,7 @@ def validate(
         The findings, with severity and counts recomputed.
 
     """
-    schema_ns = schema if schema is not None else load_schema()
+    schema_ns = schema if isinstance(schema, Namespace) else resolve(schema)
     tree = _read_tree(root)
     report = ValidationReport(
         dataset_root=Path(root),
@@ -131,7 +134,7 @@ def validate_file(
     root: str | os.PathLike[str],
     relpath: str,
     *,
-    schema: Namespace | None = None,
+    schema: Namespace | SchemaSelector = None,
     read_headers: bool = True,
     max_rows: int = 1000,
 ) -> FileVerdict:
@@ -139,9 +142,10 @@ def validate_file(
 
     The rest of the dataset is indexed so inheritance and association checks still
     work, but only the named file's findings are returned. A path that is not
-    under the dataset root yields a single ``FILE_NOT_FOUND`` finding.
+    under the dataset root yields a single ``FILE_NOT_FOUND`` finding. The
+    ``schema`` argument accepts the same forms as :func:`validate`.
     """
-    schema_ns = schema if schema is not None else load_schema()
+    schema_ns = schema if isinstance(schema, Namespace) else resolve(schema)
     tree = _read_tree(root)
     target = relpath.lstrip('/')
     for context in iter_file_contexts(tree, schema_ns):

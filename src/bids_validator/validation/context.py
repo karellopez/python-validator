@@ -33,6 +33,26 @@ if TYPE_CHECKING:
 __all__ = ['EvalContext', 'eval_context', 'iter_file_contexts']
 
 
+def _context_property_keys(schema: Namespace) -> tuple[str, ...]:
+    """Return the context-variable names the schema advertises.
+
+    Modern schemas (BIDS 1.10.0+, schema 0.11+) put these under
+    ``meta.context.properties``; legacy schemas (BIDS 1.8.0 / 1.9.0) nest them one
+    level deeper under ``meta.context.context.properties``. These keys only drive
+    the :class:`Mapping` enumeration (``__iter__`` / ``__len__``); actual lookups
+    delegate to the base context, so an empty tuple here is harmless. Falling back
+    rather than indexing blindly lets an older bundled schema validate (with
+    reduced coverage) instead of crashing.
+    """
+    node: Any = schema['meta']['context']
+    if isinstance(node, Mapping) and 'properties' in node:
+        return tuple(node['properties'].keys())
+    inner = node.get('context') if isinstance(node, Mapping) else None
+    if isinstance(inner, Mapping) and 'properties' in inner:
+        return tuple(inner['properties'].keys())
+    return ()
+
+
 def _nifti_header_to_native(header: Any) -> dict[str, Any]:
     """Convert the context NiftiHeader to native Python types for the evaluator.
 
@@ -90,7 +110,7 @@ class EvalContext(Mapping[str, Any]):
         self._base = base
         self._exists_resolver = exists_resolver
         self._read_headers = read_headers
-        self._keys: tuple[str, ...] = tuple(base.schema['meta']['context']['properties'].keys())
+        self._keys: tuple[str, ...] = _context_property_keys(base.schema)
         self._cache: dict[str, Any] = {}
 
     def __getitem__(self, key: str) -> Any:

@@ -53,7 +53,9 @@ where = ["src"]
 include = ["bids_validator*"]
 
 [tool.setuptools.package-data]
-bids_validator = ["*/*.json"]
+# Ship every packaged JSON, including the bundled BIDS schemas under
+# validation/schema/bundled/ (a recursive glob so nested data dirs are included).
+bids_validator = ["**/*.json"]
 
 [tool.versioneer]
 VCS = "git"
