@@ -24,7 +24,10 @@ requires-python = ">=3.10"
 dependencies = [
     "acres >=0.5",
     "attrs >=24.1",
-    "bidsschematools >=1.1",
+    # The ``expressions`` extra pulls in ``pyparsing``, which backs
+    # ``bidsschematools.expressions.parse`` - the schema expression parser the
+    # full-validation engine evaluates selectors and checks against.
+    "bidsschematools[expressions] >=1.1",
     "nibabel>=5.3.0",
     "orjson>=3.11.3",
     "universal_pathlib >=0.2.1",
@@ -66,7 +69,14 @@ testpaths = ["src", "tests"]
 log_level = "INFO"
 xfail_strict = true
 addopts = ["-ra", "--strict-config", "--strict-markers"]
-filterwarnings = ["error", "ignore::pytest.PytestUnraisableExceptionWarning", "ignore::SyntaxWarning:datalad*"]
+filterwarnings = [
+  "error",
+  "ignore::pytest.PytestUnraisableExceptionWarning",
+  "ignore::SyntaxWarning:datalad*",
+  # bidsschematools.expressions builds its grammar with pyparsing's deprecated
+  # delimited_list; the deprecation is upstream, not ours.
+  "ignore::pyparsing.warnings.PyparsingDeprecationWarning",
+]
 norecursedirs = ["data"]
 doctest_optionflags = ["NORMALIZE_WHITESPACE", "IGNORE_EXCEPTION_DETAIL"]
 
