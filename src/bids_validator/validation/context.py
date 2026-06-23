@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Any
 from bidsschematools.types.context import Subject
 from bidsschematools.types.namespace import Namespace
 
-from ..context import Context, Dataset, Sessions
+from ..context import Context, Dataset, Sessions, ValidationError
 from .associations import build_associations
 from .expressions import EXISTS_RESOLVER_KEY
 from .schema_introspect import directory_recordings
@@ -133,6 +133,15 @@ class EvalContext(Mapping[str, Any]):
             # apply to it (this is also what avoids double-reporting on a data
             # file's metadata once via the data file and once via its sidecar).
             value = Namespace()
+        elif key == 'sidecar':
+            # A data file's inheritance-merged sidecar. If the inheritance is
+            # ambiguous (several equally applicable sidecars), that is reported
+            # separately by the inheritance checks; here degrade to an empty sidecar
+            # rather than raise, so the value and field checks simply skip.
+            try:
+                value = self._base.sidecar
+            except ValidationError:
+                value = Namespace()
         elif key == 'entities':
             # FileParts records a no-hyphen filename token (for example the
             # "dataset" in dataset_description.json) as an entity with a None

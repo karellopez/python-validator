@@ -109,14 +109,29 @@ def _collect(node: Any, path: str, out: list[tuple[str, Mapping[str, Any]]]) -> 
 def _find_rule_matches(
     schema: Namespace, context: Mapping[str, Any], name: str
 ) -> list[tuple[str, Mapping[str, Any]]]:
+    dataset_type = _dataset_type(context)
     out: list[tuple[str, Mapping[str, Any]]] = []
     for path, node in _file_rules(schema):
-        # Derivatives are skipped by default file selection, so only raw rules apply.
-        if path.startswith('rules.files.deriv'):
+        # On a raw dataset only raw rules apply, so derivative rules are skipped. On
+        # a derivative dataset the derivative rules are included instead, so its
+        # files match a deriv rule rather than being reported NOT_INCLUDED.
+        if path.startswith('rules.files.deriv') and dataset_type != 'derivative':
             continue
         if _rule_matches(node, context, name):
             out.append((path, node))
     return out
+
+
+def _dataset_type(context: Mapping[str, Any]) -> str:
+    """Return the dataset's ``DatasetType`` ('raw' or 'derivative'), defaulting to raw."""
+    dataset = context.get('dataset')
+    try:
+        description = dataset.dataset_description if dataset is not None else None
+    except Exception:  # noqa: BLE001 - a missing/unreadable description means treat as raw
+        return 'raw'
+    if isinstance(description, Mapping):
+        return str(description.get('DatasetType', 'raw'))
+    return 'raw'
 
 
 def _rule_matches(node: Mapping[str, Any], context: Mapping[str, Any], name: str) -> bool:

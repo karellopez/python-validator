@@ -60,7 +60,10 @@ def datatype_to_modality(datatype: str, schema: Namespace) -> str:
     if not _DATATYPE_MAP:
         for mod_name, mod_dtypes in schema.rules.modalities.items():
             _DATATYPE_MAP |= dict.fromkeys(mod_dtypes['datatypes'], mod_name)
-    return _DATATYPE_MAP[datatype]
+    # Some datatype directories (for example ``phenotype``) belong to no modality;
+    # return an empty string rather than raising KeyError so building the dataset's
+    # modality set never aborts validation.
+    return _DATATYPE_MAP.get(datatype, '')
 
 
 @cache
@@ -208,10 +211,20 @@ class Dataset:
 
     @cached_property
     def dataset_description(self) -> Namespace:
-        """Contents of '/dataset_description.json'."""
-        return Namespace.from_json(
+        """Contents of '/dataset_description.json', with ``DatasetType`` defaulted.
+
+        A dataset that does not state ``DatasetType`` is a derivative when it
+        declares ``GeneratedBy``, otherwise raw (the BIDS convention). Filling this
+        in lets schema rules that select on ``DatasetType`` (for example the
+        events-missing check) apply to raw datasets, and lets derivative datasets
+        be recognised as such.
+        """
+        description = Namespace.from_json(
             UPath(self.tree.children['dataset_description.json']).read_text()
         )
+        if 'DatasetType' not in description:
+            description['DatasetType'] = 'derivative' if description.get('GeneratedBy') else 'raw'
+        return description
 
     @cached_property
     def modalities(self) -> list[str]:
